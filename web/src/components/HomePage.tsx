@@ -251,7 +251,7 @@ export function HomePage() {
       <div className="w-full max-w-2xl">
         {/* Title */}
         <h1 className="text-xl sm:text-2xl font-semibold text-cc-fg text-center mb-4 sm:mb-6">
-          What can I work on for you?
+          The Vibe Companion
         </h1>
 
         {/* Image thumbnails */}

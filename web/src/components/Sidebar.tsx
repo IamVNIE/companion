@@ -122,7 +122,7 @@ export function Sidebar() {
               <path d="M8 9h8M8 13h5M21 12c0 4.97-4.03 9-9 9a8.96 8.96 0 01-4.57-1.24L3 21l1.24-4.43A8.96 8.96 0 013 12c0-4.97 4.03-9 9-9s9 4.03 9 9z" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
             </svg>
           </div>
-          <span className="text-sm font-semibold text-cc-fg tracking-tight">Claude Code</span>
+          <span className="text-sm font-semibold text-cc-fg tracking-tight">The Vibe Companion</span>
         </div>
 
         <button

@@ -29,11 +29,11 @@ export function Composer({ sessionId }: { sessionId: string }) {
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const cliConnected = useStore((s) => s.cliConnected);
-  const session = useStore((s) => s.sessions.get(sessionId));
-  const previousMode = useStore((s) => s.previousPermissionMode.get(sessionId) || "bypassPermissions");
+  const sessionData = useStore((s) => s.sessions.get(sessionId));
+  const previousMode = useStore((s) => s.previousPermissionMode.get(sessionId) || "acceptEdits");
 
   const isConnected = cliConnected.get(sessionId) ?? false;
-  const currentMode = session?.permissionMode || "default";
+  const currentMode = sessionData?.permissionMode || "acceptEdits";
   const isPlan = currentMode === "plan";
 
   function handleSend() {
@@ -96,7 +96,6 @@ export function Composer({ sessionId }: { sessionId: string }) {
       newImages.push({ name: file.name, base64, mediaType });
     }
     setImages((prev) => [...prev, ...newImages]);
-    // Reset input so the same file can be re-selected
     e.target.value = "";
   }
 
@@ -129,7 +128,7 @@ export function Composer({ sessionId }: { sessionId: string }) {
       sendToSession(sessionId, { type: "set_permission_mode", mode: "plan" });
       store.updateSession(sessionId, { permissionMode: "plan" });
     } else {
-      const restoreMode = previousMode || "default";
+      const restoreMode = previousMode || "acceptEdits";
       sendToSession(sessionId, { type: "set_permission_mode", mode: restoreMode });
       store.updateSession(sessionId, { permissionMode: restoreMode });
     }
@@ -165,113 +164,113 @@ export function Composer({ sessionId }: { sessionId: string }) {
           </div>
         )}
 
-        <div className="flex items-end gap-2">
-          {/* Mode toggle - left of chatbar */}
-          <button
-            onClick={toggleMode}
+        {/* Hidden file input */}
+        <input
+          ref={fileInputRef}
+          type="file"
+          accept="image/*"
+          multiple
+          onChange={handleFileSelect}
+          className="hidden"
+        />
+
+        {/* Unified input card */}
+        <div className={`bg-cc-input-bg border rounded-[14px] overflow-hidden transition-colors ${
+          isPlan
+            ? "border-cc-primary/40"
+            : "border-cc-border focus-within:border-cc-primary/30"
+        }`}>
+          <textarea
+            ref={textareaRef}
+            value={text}
+            onChange={handleInput}
+            onKeyDown={handleKeyDown}
+            onPaste={handlePaste}
+            placeholder={isConnected ? "Type a message..." : "Waiting for CLI connection..."}
             disabled={!isConnected}
-            className={`px-2.5 py-2 rounded-[10px] text-[11px] font-medium transition-colors shrink-0 cursor-pointer ${
-              !isConnected
-                ? "opacity-40 cursor-not-allowed border border-cc-border text-cc-muted"
-                : isPlan
-                ? "bg-cc-primary text-white"
-                : "border border-cc-border text-cc-muted hover:text-cc-fg hover:border-cc-fg/30"
-            }`}
-            title={`${isPlan ? "Plan" : "Agent"} mode (Shift+Tab)`}
-          >
-            {isPlan ? "Plan" : "Agent"}
-          </button>
-
-          <div className="flex-1 relative">
-            <textarea
-              ref={textareaRef}
-              value={text}
-              onChange={handleInput}
-              onKeyDown={handleKeyDown}
-              onPaste={handlePaste}
-              placeholder={isConnected ? "Type a message..." : "Waiting for CLI connection..."}
-              disabled={!isConnected}
-              rows={1}
-              className="w-full px-3.5 py-2.5 text-sm bg-cc-input-bg border border-cc-border rounded-[10px] resize-none focus:outline-none focus:border-cc-primary/50 focus:ring-1 focus:ring-cc-primary/20 text-cc-fg font-sans-ui placeholder:text-cc-muted disabled:opacity-50 transition-all"
-              style={{ minHeight: "40px", maxHeight: "200px" }}
-            />
-          </div>
-
-          {/* Image upload button */}
-          <input
-            ref={fileInputRef}
-            type="file"
-            accept="image/*"
-            multiple
-            onChange={handleFileSelect}
-            className="hidden"
+            rows={1}
+            className="w-full px-4 pt-3 pb-1 text-sm bg-transparent resize-none focus:outline-none text-cc-fg font-sans-ui placeholder:text-cc-muted disabled:opacity-50"
+            style={{ minHeight: "36px", maxHeight: "200px" }}
           />
-          <button
-            onClick={() => fileInputRef.current?.click()}
-            disabled={!isConnected}
-            className={`flex items-center justify-center w-10 h-10 rounded-[10px] transition-colors shrink-0 ${
-              isConnected
-                ? "text-cc-muted hover:text-cc-fg hover:bg-cc-hover cursor-pointer"
-                : "text-cc-muted opacity-50 cursor-not-allowed"
-            }`}
-            title="Upload image"
-          >
-            <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" className="w-4 h-4">
-              <rect x="2" y="2" width="12" height="12" rx="2" />
-              <circle cx="5.5" cy="5.5" r="1" fill="currentColor" stroke="none" />
-              <path d="M2 11l3-3 2 2 3-4 4 5" strokeLinecap="round" strokeLinejoin="round" />
-            </svg>
-          </button>
 
-          {isRunning ? (
+          {/* Bottom toolbar */}
+          <div className="flex items-center justify-between px-2.5 pb-2.5">
+            {/* Left: mode indicator */}
             <button
-              onClick={handleInterrupt}
-              className="flex items-center justify-center w-10 h-10 rounded-[10px] bg-cc-error/10 hover:bg-cc-error/20 text-cc-error transition-colors cursor-pointer shrink-0"
-              title="Stop generation"
-            >
-              <svg viewBox="0 0 16 16" fill="currentColor" className="w-4 h-4">
-                <rect x="3" y="3" width="10" height="10" rx="1" />
-              </svg>
-            </button>
-          ) : (
-            <button
-              onClick={handleSend}
-              disabled={!canSend}
-              className={`flex items-center justify-center w-10 h-10 rounded-[10px] transition-colors shrink-0 ${
-                canSend
-                  ? "bg-cc-primary hover:bg-cc-primary-hover text-white cursor-pointer"
-                  : "bg-cc-hover text-cc-muted cursor-not-allowed"
+              onClick={toggleMode}
+              disabled={!isConnected}
+              className={`flex items-center gap-1.5 px-2 py-1 rounded-md text-[12px] font-medium transition-all cursor-pointer select-none ${
+                !isConnected
+                  ? "opacity-30 cursor-not-allowed text-cc-muted"
+                  : isPlan
+                  ? "text-cc-primary hover:bg-cc-primary/10"
+                  : "text-cc-muted hover:text-cc-fg hover:bg-cc-hover"
               }`}
-              title="Send message"
+              title="Toggle mode (Shift+Tab)"
             >
-              <svg viewBox="0 0 16 16" fill="currentColor" className="w-4 h-4">
-                <path d="M3 3l10 5-10 5V9l6-1-6-1V3z" />
-              </svg>
+              {isPlan ? (
+                /* Pause bars icon */
+                <svg viewBox="0 0 16 16" fill="currentColor" className="w-3.5 h-3.5">
+                  <rect x="3" y="3" width="3.5" height="10" rx="0.75" />
+                  <rect x="9.5" y="3" width="3.5" height="10" rx="0.75" />
+                </svg>
+              ) : (
+                /* Double chevron icon */
+                <svg viewBox="0 0 16 16" fill="currentColor" className="w-3.5 h-3.5">
+                  <path d="M2.5 4l4 4-4 4" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" fill="none" />
+                  <path d="M8.5 4l4 4-4 4" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" fill="none" />
+                </svg>
+              )}
+              <span>{isPlan ? "plan mode" : "accept edits"}</span>
             </button>
-          )}
-        </div>
 
-        <div className="mt-1.5 px-1 flex items-center justify-between">
-          <span className="text-[10px] text-cc-muted">
-            Enter to send, Shift+Tab to toggle mode
-          </span>
-          {session && session.context_used_percent > 0 && (
-            <div className="flex items-center gap-1.5">
-              <div className="w-12 h-1 rounded-full bg-cc-hover overflow-hidden">
-                <div
-                  className={`h-full rounded-full transition-all ${
-                    session.context_used_percent > 80
-                      ? "bg-cc-error"
-                      : session.context_used_percent > 50
-                      ? "bg-cc-warning"
-                      : "bg-cc-primary"
+            {/* Right: image + send/stop */}
+            <div className="flex items-center gap-1">
+              <button
+                onClick={() => fileInputRef.current?.click()}
+                disabled={!isConnected}
+                className={`flex items-center justify-center w-8 h-8 rounded-lg transition-colors ${
+                  isConnected
+                    ? "text-cc-muted hover:text-cc-fg hover:bg-cc-hover cursor-pointer"
+                    : "text-cc-muted opacity-30 cursor-not-allowed"
+                }`}
+                title="Upload image"
+              >
+                <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" className="w-4 h-4">
+                  <rect x="2" y="2" width="12" height="12" rx="2" />
+                  <circle cx="5.5" cy="5.5" r="1" fill="currentColor" stroke="none" />
+                  <path d="M2 11l3-3 2 2 3-4 4 5" strokeLinecap="round" strokeLinejoin="round" />
+                </svg>
+              </button>
+
+              {isRunning ? (
+                <button
+                  onClick={handleInterrupt}
+                  className="flex items-center justify-center w-8 h-8 rounded-lg bg-cc-error/10 hover:bg-cc-error/20 text-cc-error transition-colors cursor-pointer"
+                  title="Stop generation"
+                >
+                  <svg viewBox="0 0 16 16" fill="currentColor" className="w-3.5 h-3.5">
+                    <rect x="3" y="3" width="10" height="10" rx="1" />
+                  </svg>
+                </button>
+              ) : (
+                <button
+                  onClick={handleSend}
+                  disabled={!canSend}
+                  className={`flex items-center justify-center w-8 h-8 rounded-full transition-colors ${
+                    canSend
+                      ? "bg-cc-primary hover:bg-cc-primary-hover text-white cursor-pointer"
+                      : "bg-cc-hover text-cc-muted cursor-not-allowed"
                   }`}
-                  style={{ width: `${Math.min(session.context_used_percent, 100)}%` }}
-                />
-              </div>
-              <span className="text-[10px] text-cc-muted tabular-nums">{session.context_used_percent}%</span>
+                  title="Send message"
+                >
+                  <svg viewBox="0 0 16 16" fill="currentColor" className="w-3.5 h-3.5">
+                    <path d="M3 2l11 6-11 6V9.5l7-1.5-7-1.5V2z" />
+                  </svg>
+                </button>
+              )}
             </div>
-          )}
+          </div>
         </div>
       </div>
     </div>
