@@ -6,7 +6,7 @@ import { ChatView } from "./components/ChatView.js";
 import { TopBar } from "./components/TopBar.js";
 import { HomePage } from "./components/HomePage.js";
 import { TaskPanel } from "./components/TaskPanel.js";
-import { EditorPanel } from "./components/EditorPanel.js";
+import { DiffPanel } from "./components/DiffPanel.js";
 import { Playground } from "./components/Playground.js";
 
 function useHash() {
@@ -76,10 +76,10 @@ export default function App() {
             )}
           </div>
 
-          {/* Editor tab */}
-          {currentSessionId && activeTab === "editor" && (
+          {/* Diff tab */}
+          {currentSessionId && activeTab === "diff" && (
             <div className="absolute inset-0">
-              <EditorPanel sessionId={currentSessionId} />
+              <DiffPanel sessionId={currentSessionId} />
             </div>
           )}
         </div>
