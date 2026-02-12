@@ -568,6 +568,53 @@ export function createRoutes(
     return c.json({ ...result, git_ahead, git_behind });
   });
 
+  api.get("/git/commits", (c) => {
+    const cwd = c.req.query("cwd");
+    const baseBranch = c.req.query("baseBranch");
+    if (!cwd || !baseBranch) return c.json({ error: "cwd and baseBranch required" }, 400);
+    return c.json(gitUtils.getCommitLog(cwd, baseBranch));
+  });
+
+  api.post("/git/create-pr", async (c) => {
+    const body = await c.req.json().catch(() => ({}));
+    const { cwd, branch, baseBranch, title, body: prBody, draft } = body;
+    if (!cwd || !branch || !baseBranch || !title) {
+      return c.json({ error: "cwd, branch, baseBranch, and title are required" }, 400);
+    }
+
+    // Step 1: Push the branch
+    const pushResult = gitUtils.gitPush(cwd, branch);
+    if (!pushResult.success) {
+      return c.json({ error: `Failed to push branch: ${pushResult.output}` }, 500);
+    }
+
+    // Step 2: Create the PR
+    const prResult = gitUtils.ghCreatePR(cwd, {
+      branch,
+      baseBranch,
+      title,
+      body: prBody,
+      draft,
+    });
+    if (!prResult.success) {
+      return c.json({ error: prResult.error }, 500);
+    }
+
+    // Step 3: Refresh ahead/behind counts
+    let git_ahead = 0, git_behind = 0;
+    try {
+      const counts = execSync(
+        "git rev-list --left-right --count @{upstream}...HEAD",
+        { cwd, encoding: "utf-8", timeout: 3000 },
+      ).trim();
+      const [behind, ahead] = counts.split(/\s+/).map(Number);
+      git_ahead = ahead || 0;
+      git_behind = behind || 0;
+    } catch { /* no upstream */ }
+
+    return c.json({ ok: true, prUrl: prResult.prUrl, git_ahead, git_behind });
+  });
+
   // ─── Usage Limits ─────────────────────────────────────────────────────
 
   api.get("/usage-limits", async (c) => {
