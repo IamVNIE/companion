@@ -107,6 +107,7 @@ describe("DiffPanel", () => {
     await waitFor(() => {
       expect(container.querySelector(".diff-line-add")).toBeTruthy();
     });
+    expect(screen.getByText("Compared to default branch")).toBeInTheDocument();
   });
 
   it("shows 'No changes' when diff is empty for selected file", async () => {
