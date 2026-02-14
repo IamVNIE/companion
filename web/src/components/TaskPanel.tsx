@@ -5,6 +5,7 @@ import type { TaskItem, PluginInsight } from "../types.js";
 import { McpSection } from "./McpPanel.js";
 
 const EMPTY_TASKS: TaskItem[] = [];
+const EMPTY_PLUGIN_INSIGHTS: PluginInsight[] = [];
 const POLL_INTERVAL = 60_000;
 
 // Module-level cache — survives session switches so limits don't flash empty
@@ -314,7 +315,7 @@ function PluginInsightsSection({ sessionId, focusedPluginId, onClearFocus }: {
   focusedPluginId: string | null;
   onClearFocus: () => void;
 }) {
-  const insights = useStore((s) => s.pluginInsights.get(sessionId) || []);
+  const insights = useStore((s) => s.pluginInsights.get(sessionId) || EMPTY_PLUGIN_INSIGHTS);
   const plugins = useStore((s) => s.plugins);
   const pluginNameById = new Map(plugins.map((plugin) => [plugin.id, plugin.name]));
   const filteredInsights = focusedPluginId

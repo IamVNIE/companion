@@ -1,4 +1,5 @@
 // Types for the WebSocket bridge between Claude Code CLI and the browser
+import type { PluginInsight } from "./plugins/types.js";
 
 // ─── CLI Message Types (NDJSON from Claude Code CLI) ──────────────────────────
 
@@ -290,13 +291,4 @@ export interface PermissionRequest {
   timestamp: number;
 }
 
-export interface PluginInsight {
-  id: string;
-  plugin_id: string;
-  title: string;
-  message: string;
-  level: "info" | "success" | "warning" | "error";
-  timestamp: number;
-  session_id?: string;
-  event_name?: string;
-}
+export type { PluginInsight };

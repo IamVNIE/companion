@@ -101,4 +101,91 @@ describe("PluginsPage", () => {
       expect(useStore.getState().taskbarPluginPins.has("notifications")).toBe(true);
     });
   });
+
+  it("preserves unsaved config draft when toggling another plugin", async () => {
+    apiMock.listPlugins
+      .mockResolvedValueOnce([
+        {
+          id: "notifications",
+          name: "Session Notifications",
+          version: "1.0.0",
+          description: "Generates plugin notifications",
+          events: ["result.received"],
+          priority: 50,
+          blocking: true,
+          timeoutMs: 1000,
+          failPolicy: "continue",
+          enabled: true,
+          config: { onResultError: true },
+        },
+        {
+          id: "permission-automation",
+          name: "Permission Automation",
+          version: "1.0.0",
+          description: "Automates permission requests",
+          events: ["permission.requested"],
+          priority: 1000,
+          blocking: true,
+          timeoutMs: 1000,
+          failPolicy: "abort_current_action",
+          enabled: true,
+          config: { rules: [] },
+        },
+      ])
+      .mockResolvedValueOnce([
+        {
+          id: "notifications",
+          name: "Session Notifications",
+          version: "1.0.0",
+          description: "Generates plugin notifications",
+          events: ["result.received"],
+          priority: 50,
+          blocking: true,
+          timeoutMs: 1000,
+          failPolicy: "continue",
+          enabled: true,
+          config: { onResultError: true },
+        },
+        {
+          id: "permission-automation",
+          name: "Permission Automation",
+          version: "1.0.0",
+          description: "Automates permission requests",
+          events: ["permission.requested"],
+          priority: 1000,
+          blocking: true,
+          timeoutMs: 1000,
+          failPolicy: "abort_current_action",
+          enabled: false,
+          config: { rules: [] },
+        },
+      ]);
+    apiMock.disablePlugin.mockResolvedValueOnce({
+      id: "permission-automation",
+      name: "Permission Automation",
+      version: "1.0.0",
+      description: "Automates permission requests",
+      events: ["permission.requested"],
+      priority: 1000,
+      blocking: true,
+      timeoutMs: 1000,
+      failPolicy: "abort_current_action",
+      enabled: false,
+      config: { rules: [] },
+    });
+
+    render(<PluginsPage embedded />);
+    await screen.findByText("Permission Automation");
+
+    const editors = screen.getAllByRole("textbox");
+    fireEvent.change(editors[0], { target: { value: '{\n  "onResultError": false\n}' } });
+
+    const toggles = screen.getAllByRole("button", { name: "Enabled" });
+    fireEvent.click(toggles[1]);
+
+    // Editing one plugin must survive refreshes triggered by a different plugin action.
+    await waitFor(() => {
+      expect(editors[0]).toHaveValue('{\n  "onResultError": false\n}');
+    });
+  });
 });

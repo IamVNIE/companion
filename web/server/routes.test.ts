@@ -383,6 +383,34 @@ describe("POST /api/sessions/create", () => {
     expect(json.error).toContain("Invalid backend");
     expect(launcher.launch).not.toHaveBeenCalled();
   });
+
+  it("still returns 200 when session.created plugin emit fails", async () => {
+    const pluginManager = {
+      emit: vi.fn(async () => {
+        throw new Error("plugin failed");
+      }),
+      list: vi.fn(() => []),
+      setEnabled: vi.fn(),
+      updateConfig: vi.fn(),
+    } as any;
+    const pluginBridge = {
+      ...bridge,
+      getOrCreateSession: vi.fn(() => ({ id: "session-1", backendType: "claude", state: { session_id: "session-1" } })),
+    } as any;
+    const pluginApp = new Hono();
+    const terminalManager = { getInfo: () => null, spawn: () => "", kill: () => {} } as any;
+    pluginApp.route("/api", createRoutes(launcher, pluginBridge, sessionStore, tracker, terminalManager, undefined, pluginManager));
+
+    const res = await pluginApp.request("/api/sessions/create", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ cwd: "/test" }),
+    });
+
+    // Plugin lifecycle notifications must never fail primary route behavior.
+    expect(res.status).toBe(200);
+    expect(pluginManager.emit).toHaveBeenCalledTimes(1);
+  });
 });
 
 describe("Plugin routes", () => {
@@ -579,6 +607,23 @@ describe("POST /api/sessions/:id/kill", () => {
     const json = await res.json();
     expect(json).toEqual({ error: "Session not found or already exited" });
   });
+
+  it("still returns 200 when session.killed plugin emit fails", async () => {
+    const pluginManager = {
+      emit: vi.fn(async () => {
+        throw new Error("plugin failed");
+      }),
+      list: vi.fn(() => []),
+      setEnabled: vi.fn(),
+      updateConfig: vi.fn(),
+    } as any;
+    const pluginApp = new Hono();
+    const terminalManager = { getInfo: () => null, spawn: () => "", kill: () => {} } as any;
+    pluginApp.route("/api", createRoutes(launcher, bridge, sessionStore, tracker, terminalManager, undefined, pluginManager));
+
+    const res = await pluginApp.request("/api/sessions/s1/kill", { method: "POST" });
+    expect(res.status).toBe(200);
+  });
 });
 
 describe("POST /api/sessions/:id/relaunch", () => {
@@ -646,6 +691,23 @@ describe("DELETE /api/sessions/:id", () => {
     });
     expect(tracker.removeBySession).toHaveBeenCalledWith("s1");
   });
+
+  it("still returns 200 when session.deleted plugin emit fails", async () => {
+    const pluginManager = {
+      emit: vi.fn(async () => {
+        throw new Error("plugin failed");
+      }),
+      list: vi.fn(() => []),
+      setEnabled: vi.fn(),
+      updateConfig: vi.fn(),
+    } as any;
+    const pluginApp = new Hono();
+    const terminalManager = { getInfo: () => null, spawn: () => "", kill: () => {} } as any;
+    pluginApp.route("/api", createRoutes(launcher, bridge, sessionStore, tracker, terminalManager, undefined, pluginManager));
+
+    const res = await pluginApp.request("/api/sessions/s1", { method: "DELETE" });
+    expect(res.status).toBe(200);
+  });
 });
 
 describe("POST /api/sessions/:id/archive", () => {
@@ -662,6 +724,27 @@ describe("POST /api/sessions/:id/archive", () => {
     expect(launcher.kill).toHaveBeenCalledWith("s1");
     expect(launcher.setArchived).toHaveBeenCalledWith("s1", true);
     expect(sessionStore.setArchived).toHaveBeenCalledWith("s1", true);
+  });
+
+  it("still returns 200 when session.archived plugin emit fails", async () => {
+    const pluginManager = {
+      emit: vi.fn(async () => {
+        throw new Error("plugin failed");
+      }),
+      list: vi.fn(() => []),
+      setEnabled: vi.fn(),
+      updateConfig: vi.fn(),
+    } as any;
+    const pluginApp = new Hono();
+    const terminalManager = { getInfo: () => null, spawn: () => "", kill: () => {} } as any;
+    pluginApp.route("/api", createRoutes(launcher, bridge, sessionStore, tracker, terminalManager, undefined, pluginManager));
+
+    const res = await pluginApp.request("/api/sessions/s1/archive", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({}),
+    });
+    expect(res.status).toBe(200);
   });
 });
 

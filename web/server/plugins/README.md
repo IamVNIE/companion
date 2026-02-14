@@ -1,10 +1,35 @@
-# Plugin System (V2)
+# Companion Plugin Authoring Guide
 
-This folder contains Companion's server-side plugin runtime.
+This directory contains Companion's server-side plugin runtime.
 
-## Event Contract
+Important: Companion does not load third-party plugins dynamically at runtime.
+Plugin contributions are merged through pull requests, then bundled as built-in plugins.
 
-All events use a versioned envelope:
+## Quick Start (PR-friendly)
+
+Generate a plugin scaffold:
+
+```bash
+cd web
+bun run plugin:new my-plugin-id
+```
+
+This command creates:
+
+- `server/plugins/my-plugin-id.ts`
+- `server/plugins/my-plugin-id.test.ts`
+- registration in `server/plugins/builtins.ts`
+
+Then run:
+
+```bash
+bun run typecheck
+bun run test
+```
+
+## Runtime Contract
+
+All plugin events use a versioned envelope:
 
 ```ts
 {
@@ -22,27 +47,31 @@ All events use a versioned envelope:
 }
 ```
 
-`eventVersion` is mandatory for forward compatibility.
+`eventVersion` is required for forward compatibility.
 
-## Execution Semantics
+## Execution Policy
 
-Each plugin declares execution policy:
+Each plugin must define deterministic execution behavior:
 
-- `priority`: higher value runs first on the same event.
-- `blocking`: if `true`, awaited in order; if `false`, fire-and-forget.
-- `timeoutMs`: max execution time before timeout error.
+- `priority`: higher values run first for the same event.
+- `blocking`:
+  - `true`: plugin runs in the blocking chain.
+  - `false`: plugin runs fire-and-forget.
+- `timeoutMs`: max runtime for one event invocation.
 - `failPolicy`:
-  - `continue`: keep running the remaining plugins.
-  - `abort_current_action`: stop processing remaining plugins for this event.
+  - `continue`: continue the chain after plugin failure.
+  - `abort_current_action`: stop processing the current action.
 
-## Plugin Definition
+Use `abort_current_action` only for safety-critical flows.
+
+## Plugin Definition Standard
 
 ```ts
 const plugin: PluginDefinition<MyConfig> = {
   id: "my-plugin",
   name: "My Plugin",
   version: "1.0.0",
-  description: "My plugin description",
+  description: "What this plugin does.",
   events: ["result.received"], // or ["*"] for all events
   priority: 100,
   blocking: true,
@@ -52,29 +81,62 @@ const plugin: PluginDefinition<MyConfig> = {
   defaultConfig: { /* ... */ },
   validateConfig: (raw) => normalizedConfig,
   onEvent: async (event, config) => {
-    // return insights, permissionDecision, userMessageMutation and/or eventDataPatch
+    // return insights, permissionDecision, userMessageMutation, and/or eventDataPatch
   },
 };
 ```
 
 ## Middleware Pattern
 
-- Use `user.message.before_send` to implement message middleware before any user message is sent.
-- `userMessageMutation.content` can rewrite the user input.
-- `userMessageMutation.blocked` can stop sending the message.
-- `events: ["*"]` lets a plugin run on every event.
-- `eventDataPatch` can patch `event.data` for downstream plugins in the same chain.
+Use `user.message.before_send` for middleware-like transformations:
 
-## Integration Checklist
+- `userMessageMutation.content`: rewrite outgoing user text.
+- `userMessageMutation.images`: rewrite outgoing images.
+- `userMessageMutation.blocked`: block message delivery.
+- `userMessageMutation.message`: explain why a message was blocked.
 
-1. Create a plugin file in this folder.
-2. Export it from `builtins.ts` via `getBuiltinPlugins()`.
-3. Add config validation for deterministic runtime behavior.
-4. Add tests in `manager.test.ts` (or plugin-specific tests).
-5. Expose config shape in the `/plugins` UI (JSON config editor already available).
+Use this only when behavior is explicit and predictable.
 
-## Notes
+## UI Integration Expectations
 
-- Permission automation should remain explicit and rule-based.
-- Non-blocking plugins should only perform side effects (notifications, telemetry, etc.).
-- Use `correlationId` for traceability between request/response events.
+Plugin insights are shown in:
+
+- top bar badges and quick actions (if pinned)
+- session panel automation section
+- chat feed system entries
+
+To keep UI usable, insight messages should be:
+
+- short (1 sentence)
+- actionable
+- non-spammy
+- stable in wording
+
+## Required Test Coverage for Plugin PRs
+
+Each plugin PR should include tests for:
+
+1. config validation (valid + invalid payloads)
+2. enabled/disabled behavior
+3. primary event path
+4. timeout/failure behavior where relevant
+5. mutation/decision outputs (if plugin uses middleware or permissions)
+
+## Compatibility Requirements
+
+All plugin behavior must be compatible with both backends:
+
+- Claude Code (`backendType = "claude"`)
+- Codex (`backendType = "codex"`)
+
+If behavior is backend-specific, gate it explicitly and document it.
+
+## PR Checklist
+
+- plugin `id` is kebab-case and stable
+- `defaultEnabled` is intentional and justified
+- `priority`, `blocking`, `timeoutMs`, `failPolicy` are explicitly chosen
+- config schema has `validateConfig`
+- tests added and passing
+- user-facing insight text reviewed for clarity
+- no route/session flow is blocked by non-critical plugin failures

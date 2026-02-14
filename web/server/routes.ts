@@ -24,6 +24,7 @@ import {
 } from "./update-checker.js";
 import { refreshServiceDefinition } from "./service.js";
 import { PluginConfigValidationError, type PluginManager } from "./plugins/manager.js";
+import type { PluginEvent } from "./plugins/types.js";
 
 const UPDATE_CHECK_STALE_MS = 5 * 60 * 1000;
 
@@ -79,6 +80,12 @@ export function createRoutes(
   pluginManager?: PluginManager,
 ) {
   const api = new Hono();
+  const emitRoutePluginEvent = (event: PluginEvent): void => {
+    if (!pluginManager) return;
+    void pluginManager.emit(event).catch((err) => {
+      console.error(`[routes] Plugin emit failed for ${event.name}:`, err);
+    });
+  };
 
   // ─── SDK Sessions (--sdk-url) ─────────────────────────────────────
 
@@ -213,7 +220,7 @@ export function createRoutes(
 
       if (pluginManager) {
         const bridgeSession = wsBridge.getOrCreateSession(session.sessionId, backend);
-        await pluginManager.emit({
+        emitRoutePluginEvent({
           name: "session.created",
           meta: {
             eventId: crypto.randomUUID(),
@@ -283,7 +290,7 @@ export function createRoutes(
     // Clean up container if any
     containerManager.removeContainer(id);
     if (killed && pluginManager) {
-      await pluginManager.emit({
+      emitRoutePluginEvent({
         name: "session.killed",
         meta: {
           eventId: crypto.randomUUID(),
@@ -320,7 +327,7 @@ export function createRoutes(
     launcher.removeSession(id);
     wsBridge.closeSession(id);
     if (pluginManager) {
-      await pluginManager.emit({
+      emitRoutePluginEvent({
         name: "session.deleted",
         meta: {
           eventId: crypto.randomUUID(),
@@ -352,7 +359,7 @@ export function createRoutes(
     launcher.setArchived(id, true);
     sessionStore.setArchived(id, true);
     if (pluginManager) {
-      await pluginManager.emit({
+      emitRoutePluginEvent({
         name: "session.archived",
         meta: {
           eventId: crypto.randomUUID(),

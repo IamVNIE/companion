@@ -1,7 +1,9 @@
-import { useState, useSyncExternalStore } from "react";
+import { useMemo, useState, useSyncExternalStore } from "react";
 import { useStore } from "../store.js";
 import { api } from "../api.js";
 import { ClaudeMdEditor } from "./ClaudeMdEditor.js";
+
+const EMPTY_INSIGHTS: Array<{ id: string; plugin_id: string }> = [];
 
 export function TopBar() {
   const hash = useSyncExternalStore(
@@ -42,15 +44,17 @@ export function TopBar() {
   const taskbarPluginPins = useStore((s) => s.taskbarPluginPins);
   const plugins = useStore((s) => s.plugins);
   const setTaskbarPluginFocus = useStore((s) => s.setTaskbarPluginFocus);
-  const pluginInsightCountByPlugin = useStore((s) => {
-    if (!currentSessionId) return new Map<string, number>();
+  const sessionPluginInsights = useStore((s) => {
+    if (!currentSessionId) return EMPTY_INSIGHTS;
+    return s.pluginInsights.get(currentSessionId) || EMPTY_INSIGHTS;
+  });
+  const pluginInsightCountByPlugin = useMemo(() => {
     const counts = new Map<string, number>();
-    const insights = s.pluginInsights.get(currentSessionId) || [];
-    for (const insight of insights) {
+    for (const insight of sessionPluginInsights) {
       counts.set(insight.plugin_id, (counts.get(insight.plugin_id) || 0) + 1);
     }
     return counts;
-  });
+  }, [sessionPluginInsights]);
   const pinnedTaskbarPlugins = plugins.filter((plugin) => plugin.enabled && taskbarPluginPins.has(plugin.id));
 
   const cwd = useStore((s) => {

@@ -27,14 +27,23 @@ export function PluginsPage({ embedded = false }: PluginsPageProps) {
   const [savingId, setSavingId] = useState<string | null>(null);
   const [draftById, setDraftById] = useState<Map<string, string>>(new Map());
 
-  async function refreshPlugins() {
+  async function refreshPlugins(options?: { preserveDrafts?: boolean }) {
     const list = await api.listPlugins();
     setPlugins(list);
-    const drafts = new Map<string, string>();
-    for (const plugin of list) {
-      drafts.set(plugin.id, stringifyConfig(plugin.config));
-    }
-    setDraftById(drafts);
+    const preserveDrafts = options?.preserveDrafts ?? false;
+    setDraftById((prev) => {
+      const next = new Map<string, string>();
+      for (const plugin of list) {
+        const serverDraft = stringifyConfig(plugin.config);
+        const currentDraft = prev.get(plugin.id);
+        if (preserveDrafts && currentDraft !== undefined && currentDraft !== serverDraft) {
+          next.set(plugin.id, currentDraft);
+        } else {
+          next.set(plugin.id, serverDraft);
+        }
+      }
+      return next;
+    });
     return list;
   }
 
@@ -56,7 +65,7 @@ export function PluginsPage({ embedded = false }: PluginsPageProps) {
       } else {
         await api.disablePlugin(plugin.id);
       }
-      await refreshPlugins();
+      await refreshPlugins({ preserveDrafts: true });
     } catch (err: unknown) {
       setError(err instanceof Error ? err.message : String(err));
     } finally {
@@ -71,7 +80,7 @@ export function PluginsPage({ embedded = false }: PluginsPageProps) {
       const raw = draftById.get(plugin.id) || "{}";
       const parsed = JSON.parse(raw) as unknown;
       const updated = await api.updatePluginConfig(plugin.id, parsed);
-      await refreshPlugins();
+      await refreshPlugins({ preserveDrafts: true });
       setDraftById((prev) => {
         const next = new Map(prev);
         next.set(plugin.id, stringifyConfig(updated.config));

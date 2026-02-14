@@ -27,7 +27,7 @@ import type {
 } from "./session-types.js";
 import type { SessionStore } from "./session-store.js";
 import type { CodexAdapter } from "./codex-adapter.js";
-import type { PluginManager } from "./plugins/manager.js";
+import type { EmitResult, PluginManager } from "./plugins/manager.js";
 import type { PluginEvent } from "./plugins/types.js";
 
 // ─── WebSocket data tags ──────────────────────────────────────────────────────
@@ -324,7 +324,7 @@ export class WsBridge {
     return event as unknown as Extract<PluginEvent, { name: T }>;
   }
 
-  private async emitPluginEvent(event: PluginEvent): Promise<{ insights: PluginInsight[]; permissionDecision?: { behavior: "allow" | "deny"; message?: string; updated_input?: Record<string, unknown>; pluginId?: string }; userMessageMutation?: { content?: string; images?: Array<{ media_type: string; data: string }>; blocked?: boolean; message?: string; pluginId?: string }; aborted: boolean }> {
+  private async emitPluginEvent(event: PluginEvent): Promise<EmitResult> {
     if (!this.pluginManager) return { insights: [], aborted: false };
     const sessionId = event.meta.sessionId;
     const session = sessionId ? this.sessions.get(sessionId) : undefined;
@@ -701,6 +701,11 @@ export class WsBridge {
             return;
           }
 
+          session.pendingPermissions.set(msg.request.request_id, msg.request);
+          this.persistSession(session);
+          this.broadcastToBrowsers(session, msg);
+        }).catch((err: unknown) => {
+          console.error(`[ws-bridge] Plugin emit failed in codex permission flow, falling back:`, err);
           session.pendingPermissions.set(msg.request.request_id, msg.request);
           this.persistSession(session);
           this.broadcastToBrowsers(session, msg);
@@ -1234,6 +1239,22 @@ export class WsBridge {
           return;
         }
 
+        session.pendingPermissions.set(msg.request_id, perm);
+        this.broadcastToBrowsers(session, {
+          type: "permission_request",
+          request: perm,
+        });
+        this.persistSession(session);
+      }).catch((err) => {
+        console.error(`[ws-bridge] Plugin emit failed in Claude permission flow, falling back:`, err);
+        session.pendingPermissions.set(msg.request_id, perm);
+        this.broadcastToBrowsers(session, {
+          type: "permission_request",
+          request: perm,
+        });
+        this.persistSession(session);
+      }).catch((err: unknown) => {
+        console.error(`[ws-bridge] Plugin emit failed in Claude permission flow, falling back:`, err);
         session.pendingPermissions.set(msg.request_id, perm);
         this.broadcastToBrowsers(session, {
           type: "permission_request",
