@@ -3,16 +3,7 @@ import { render, screen, fireEvent } from "@testing-library/react";
 import "@testing-library/jest-dom";
 import { SessionItem } from "./SessionItem.js";
 import type { SessionItem as SessionItemType } from "../utils/project-grouping.js";
-
-const clearRecentlyRenamed = vi.fn();
-
-vi.mock("../store.js", () => ({
-  useStore: {
-    getState: () => ({
-      clearRecentlyRenamed,
-    }),
-  },
-}));
+import { useStore } from "../store.js";
 
 function makeSession(overrides: Partial<SessionItemType> = {}): SessionItemType {
   return {
@@ -39,11 +30,12 @@ function makeSession(overrides: Partial<SessionItemType> = {}): SessionItemType 
 
 describe("SessionItem", () => {
   beforeEach(() => {
-    vi.clearAllMocks();
+    useStore.getState().reset();
   });
 
   it("clears recently renamed state when name animation ends", () => {
     const session = makeSession();
+    useStore.setState({ recentlyRenamed: new Set(["s1"]) });
 
     render(
       <SessionItem
@@ -71,6 +63,6 @@ describe("SessionItem", () => {
     const nameEl = screen.getByText("Animated Name");
     fireEvent(nameEl, new Event("animationend", { bubbles: true }));
 
-    expect(clearRecentlyRenamed).toHaveBeenCalledWith("s1");
+    expect(useStore.getState().recentlyRenamed.has("s1")).toBe(false);
   });
 });
