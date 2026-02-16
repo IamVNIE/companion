@@ -185,9 +185,11 @@ describe("launch", () => {
     });
 
     const [cmdAndArgs] = mockSpawn.mock.calls[0];
-    const modeIdx = cmdAndArgs.indexOf("--permission-mode");
-    expect(modeIdx).toBeGreaterThan(-1);
-    expect(cmdAndArgs[modeIdx + 1]).toBe("acceptEdits");
+    // With bash -lc wrapping, CLI args are in the last element as a single string
+    const bashCmd = cmdAndArgs[cmdAndArgs.length - 1];
+    expect(bashCmd).toContain("--permission-mode");
+    expect(bashCmd).toContain("acceptEdits");
+    expect(bashCmd).not.toContain("bypassPermissions");
   });
 
   it("uses COMPANION_CONTAINER_SDK_HOST for containerized sdk-url when set", () => {
@@ -199,9 +201,10 @@ describe("launch", () => {
     });
 
     const [cmdAndArgs] = mockSpawn.mock.calls[0];
-    const sdkIdx = cmdAndArgs.indexOf("--sdk-url");
-    expect(sdkIdx).toBeGreaterThan(-1);
-    expect(cmdAndArgs[sdkIdx + 1]).toBe("ws://172.17.0.1:3456/ws/cli/test-session-id");
+    // With bash -lc wrapping, CLI args are in the last element as a single string
+    const bashCmd = cmdAndArgs[cmdAndArgs.length - 1];
+    expect(bashCmd).toContain("--sdk-url");
+    expect(bashCmd).toContain("ws://172.17.0.1:3456/ws/cli/test-session-id");
   });
 
   it("passes --allowedTools for each tool", () => {
@@ -266,7 +269,8 @@ describe("launch", () => {
     expect(info.containerImage).toBe("ubuntu:22.04");
   });
 
-  it("uses docker exec -i for containerized Claude sessions", () => {
+  it("uses docker exec -i with bash -lc for containerized Claude sessions", () => {
+    // bash -lc ensures ~/.bashrc is sourced so nvm-installed CLIs are on PATH
     launcher.launch({
       cwd: "/tmp/project",
       containerId: "abc123def456",
@@ -277,6 +281,9 @@ describe("launch", () => {
     expect(cmdAndArgs[0]).toBe("docker");
     expect(cmdAndArgs[1]).toBe("exec");
     expect(cmdAndArgs[2]).toBe("-i");
+    // Should wrap the CLI command in bash -lc for login shell PATH
+    expect(cmdAndArgs).toContain("bash");
+    expect(cmdAndArgs).toContain("-lc");
   });
 
   it("sets session pid from spawned process", () => {

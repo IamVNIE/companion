@@ -386,7 +386,9 @@ export class CliLauncher {
       dockerArgs.push("-e", "CLAUDECODE=");
 
       dockerArgs.push(options.containerName || options.containerId!);
-      dockerArgs.push(binary, ...args);
+      // Use a login shell so ~/.bashrc is sourced and nvm/bun/deno/etc are on PATH
+      const innerCmd = [binary, ...args].map(a => `'${a.replace(/'/g, "'\\''")}'`).join(" ");
+      dockerArgs.push("bash", "-lc", innerCmd);
 
       spawnCmd = dockerArgs;
       // Host env for the docker CLI itself
@@ -532,7 +534,9 @@ export class CliLauncher {
       }
       dockerArgs.push("-e", "CLAUDECODE=");
       dockerArgs.push(options.containerName || options.containerId!);
-      dockerArgs.push(binary, ...args);
+      // Use a login shell so ~/.bashrc is sourced and nvm/bun/deno/etc are on PATH
+      const innerCmd = [binary, ...args].map(a => `'${a.replace(/'/g, "'\\''")}'`).join(" ");
+      dockerArgs.push("bash", "-lc", innerCmd);
 
       spawnCmd = dockerArgs;
       spawnEnv = { ...process.env, PATH: getEnrichedPath() };
