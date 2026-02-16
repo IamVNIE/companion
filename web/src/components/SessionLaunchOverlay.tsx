@@ -28,7 +28,7 @@ export function SessionLaunchOverlay({ steps, error, backend, onCancel }: Props)
       : currentStep?.label || lastDone?.label || "Preparing...";
 
   return (
-    <div className="absolute inset-0 z-50 flex flex-col items-center justify-center bg-cc-bg/95 backdrop-blur-sm animate-in fade-in duration-200">
+    <div className="absolute inset-0 z-50 flex flex-col items-center justify-center bg-cc-bg/95 backdrop-blur-sm animate-fade-in">
       {/* Pulsing logo */}
       <div className="relative mb-8">
         {/* Glow ring behind logo during progress */}

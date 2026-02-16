@@ -345,7 +345,9 @@ export function HomePage() {
     } catch (e: unknown) {
       const errMsg = e instanceof Error ? e.message : String(e);
       setError(errMsg);
-      useStore.getState().setSessionCreating(false);
+      // Set error in store so the overlay can display it; keep sessionCreating
+      // true so the overlay stays visible — user dismisses via the overlay's cancel button
+      useStore.getState().setCreationError(errMsg);
       setSending(false);
     }
   }

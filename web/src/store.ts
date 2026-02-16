@@ -67,6 +67,7 @@ interface AppState {
   addCreationProgress: (step: CreationProgressEvent) => void;
   clearCreation: () => void;
   setSessionCreating: (creating: boolean, backend?: "claude" | "codex") => void;
+  setCreationError: (error: string | null) => void;
 
   // UI
   darkMode: boolean;
@@ -272,6 +273,7 @@ export const useStore = create<AppState>((set) => ({
   }),
   clearCreation: () => set({ creationProgress: null, creationError: null, sessionCreating: false, sessionCreatingBackend: null }),
   setSessionCreating: (creating, backend) => set({ sessionCreating: creating, sessionCreatingBackend: backend ?? null }),
+  setCreationError: (error) => set({ creationError: error }),
 
   setDarkMode: (v) => {
     localStorage.setItem("cc-dark-mode", String(v));
