@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState, useSyncExternalStore } from "react";
+import { useCallback, useEffect, useMemo, useState, useSyncExternalStore } from "react";
 import { useStore } from "../store.js";
 import { api } from "../api.js";
 import { ClaudeMdEditor } from "./ClaudeMdEditor.js";
@@ -68,7 +68,7 @@ export function TopBar() {
   });
   const isContainerized = !!(sdkSession?.containerId || bridgeSession?.is_containerized);
 
-  const openQuickTerminal = (opts: { target: "host" | "docker"; cwd: string; containerId?: string }) => {
+  const openQuickTerminal = useCallback((opts: { target: "host" | "docker"; cwd: string; containerId?: string }) => {
     const key = `${opts.target}:${opts.cwd}:${opts.containerId || ""}`;
     const existing = terminalTabs.find((t) => t.id === key);
     if (existing) {
@@ -83,23 +83,21 @@ export function TopBar() {
       cwd: opts.cwd,
       containerId: opts.containerId,
     };
-    setTerminalTabs((tabs) => [...tabs, next]);
+    setTerminalTabs([...terminalTabs, next]);
     setActiveTerminalTabId(next.id);
     setTerminalPanelOpen(true);
-  };
+  }, [terminalTabs]);
 
-  const closeTerminalTab = (tabId: string) => {
-    setTerminalTabs((tabs) => {
-      const next = tabs.filter((t) => t.id !== tabId);
-      if (activeTerminalTabId === tabId) {
-        setActiveTerminalTabId(next[0]?.id || null);
-      }
-      if (next.length === 0) {
-        setTerminalPanelOpen(false);
-      }
-      return next;
-    });
-  };
+  const closeTerminalTab = useCallback((tabId: string) => {
+    const next = terminalTabs.filter((t) => t.id !== tabId);
+    setTerminalTabs(next);
+    if (activeTerminalTabId === tabId) {
+      setActiveTerminalTabId(next[0]?.id || null);
+    }
+    if (next.length === 0) {
+      setTerminalPanelOpen(false);
+    }
+  }, [terminalTabs, activeTerminalTabId]);
 
   useEffect(() => {
     if (!currentSessionId) {
@@ -118,7 +116,7 @@ export function TopBar() {
     };
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
-  }, [isSessionView, cwd, terminalTabs]);
+  }, [isSessionView, cwd, openQuickTerminal]);
 
   const isConnected = currentSessionId ? (cliConnected.get(currentSessionId) ?? false) : false;
   const status = currentSessionId ? (sessionStatus.get(currentSessionId) ?? null) : null;

@@ -117,7 +117,9 @@ export function TerminalView({
       fitRef.current = null;
       const terminalId = terminalIdRef.current;
       terminalIdRef.current = null;
-      api.killTerminal(terminalId ?? undefined).catch(() => {});
+      if (terminalId) {
+        api.killTerminal(terminalId).catch(() => {});
+      }
     };
   }, [cwd, containerId]);
 

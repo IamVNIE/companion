@@ -622,7 +622,7 @@ export const api = {
   // Terminal
   spawnTerminal: (cwd: string, cols?: number, rows?: number, opts?: { containerId?: string }) =>
     post<{ terminalId: string }>("/terminal/spawn", { cwd, cols, rows, containerId: opts?.containerId }),
-  killTerminal: (terminalId?: string) =>
+  killTerminal: (terminalId: string) =>
     post<{ ok: boolean }>("/terminal/kill", { terminalId }),
   getTerminal: (terminalId?: string) =>
     get<{ active: boolean; terminalId?: string; cwd?: string }>(

@@ -1565,7 +1565,9 @@ export function createRoutes(
 
   api.post("/terminal/kill", async (c) => {
     const body = await c.req.json<{ terminalId?: string }>().catch(() => undefined);
-    terminalManager.kill(body?.terminalId);
+    const terminalId = body?.terminalId?.trim();
+    if (!terminalId) return c.json({ error: "terminalId is required" }, 400);
+    terminalManager.kill(terminalId);
     return c.json({ ok: true });
   });
 

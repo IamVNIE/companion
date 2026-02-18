@@ -35,10 +35,21 @@ export class TerminalManager {
   spawn(cwd: string, cols = 80, rows = 24, options?: { containerId?: string }): string {
     const id = randomUUID();
     const containerId = options?.containerId?.trim() || undefined;
-    const shell = containerId ? "bash" : resolveShell();
     const sockets = new Set<ServerWebSocket<SocketData>>();
+    const shell = resolveShell();
     const cmd = containerId
-      ? ["docker", "exec", "-i", "-w", cwd, containerId, shell, "-l"]
+      ? [
+          "docker",
+          "exec",
+          "-i",
+          "-t",
+          "-w",
+          cwd,
+          containerId,
+          "sh",
+          "-lc",
+          "if command -v bash >/dev/null 2>&1; then exec bash -l; else exec sh -l; fi",
+        ]
       : [shell, "-l"];
 
     const proc = Bun.spawn(cmd, {
@@ -88,7 +99,7 @@ export class TerminalManager {
       orphanTimer: null,
     });
     console.log(
-      `[terminal] Spawned terminal ${id} in ${cwd}${containerId ? ` (container ${containerId.slice(0, 12)})` : ""} (${shell}, ${cols}x${rows})`,
+      `[terminal] Spawned terminal ${id} in ${cwd}${containerId ? ` (container ${containerId.slice(0, 12)})` : ""} (${containerId ? "docker-shell" : shell}, ${cols}x${rows})`,
     );
 
     // Handle process exit
@@ -116,8 +127,8 @@ export class TerminalManager {
   }
 
   /** Handle a message from a browser WebSocket */
-  handleBrowserMessage(_ws: ServerWebSocket<SocketData>, msg: string | Buffer): void {
-    const terminalId = this.getTerminalIdFromSocket(_ws);
+  handleBrowserMessage(ws: ServerWebSocket<SocketData>, msg: string | Buffer): void {
+    const terminalId = this.getTerminalIdFromSocket(ws);
     if (!terminalId) return;
     const inst = this.instances.get(terminalId);
     if (!inst) return;
@@ -171,14 +182,8 @@ export class TerminalManager {
     console.log(`[terminal] Killed terminal ${inst.id}`);
   }
 
-  /** Kill one terminal (or all terminals when terminalId is omitted). */
-  kill(terminalId?: string): void {
-    if (!terminalId) {
-      for (const inst of Array.from(this.instances.values())) {
-        this.killInstance(inst);
-      }
-      return;
-    }
+  /** Kill one terminal instance. */
+  kill(terminalId: string): void {
     const inst = this.instances.get(terminalId);
     if (!inst) return;
     this.killInstance(inst);
