@@ -117,17 +117,16 @@ function resolveGitInfo(state: SessionState): void {
   if (!state.cwd) return;
   // Preserve is_containerized — it's set during session launch, not derived from git
   const wasContainerized = state.is_containerized;
+  // Suppress stderr via stdio (cross-platform; avoids 2>/dev/null which is Unix-only)
+  const gitExecOpts = { cwd: state.cwd, encoding: "utf-8" as const, timeout: 3000, stdio: ["pipe", "pipe", "pipe"] as ["pipe", "pipe", "pipe"] };
   try {
-    state.git_branch = execSync("git rev-parse --abbrev-ref HEAD 2>/dev/null", {
-      cwd: state.cwd, encoding: "utf-8", timeout: 3000,
-    }).trim();
+    state.git_branch = execSync("git rev-parse --abbrev-ref HEAD", gitExecOpts).trim();
 
     // Detect if this is a linked worktree
     try {
-      const gitDir = execSync("git rev-parse --git-dir 2>/dev/null", {
-        cwd: state.cwd, encoding: "utf-8", timeout: 3000,
-      }).trim();
-      state.is_worktree = gitDir.includes("/worktrees/");
+      const gitDir = execSync("git rev-parse --git-dir", gitExecOpts).trim();
+      // Normalize backslashes on Windows before checking for /worktrees/
+      state.is_worktree = gitDir.replace(/\\/g, "/").includes("/worktrees/");
     } catch {
       state.is_worktree = false;
     }
@@ -136,22 +135,18 @@ function resolveGitInfo(state: SessionState): void {
       // For worktrees, --show-toplevel gives the worktree root, not the main repo.
       // Use --git-common-dir to find the real repo root.
       if (state.is_worktree) {
-        const commonDir = execSync("git rev-parse --git-common-dir 2>/dev/null", {
-          cwd: state.cwd, encoding: "utf-8", timeout: 3000,
-        }).trim();
+        const commonDir = execSync("git rev-parse --git-common-dir", gitExecOpts).trim();
         // commonDir is e.g. /path/to/repo/.git — parent is the repo root
         state.repo_root = resolve(state.cwd, commonDir, "..");
       } else {
-        state.repo_root = execSync("git rev-parse --show-toplevel 2>/dev/null", {
-          cwd: state.cwd, encoding: "utf-8", timeout: 3000,
-        }).trim();
+        state.repo_root = execSync("git rev-parse --show-toplevel", gitExecOpts).trim();
       }
     } catch { /* ignore */ }
 
     try {
       const counts = execSync(
-        "git rev-list --left-right --count @{upstream}...HEAD 2>/dev/null",
-        { cwd: state.cwd, encoding: "utf-8", timeout: 3000 },
+        "git rev-list --left-right --count @{upstream}...HEAD",
+        gitExecOpts,
       ).trim();
       const [behind, ahead] = counts.split(/\s+/).map(Number);
       state.git_ahead = ahead || 0;
