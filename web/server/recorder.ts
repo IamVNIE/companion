@@ -3,6 +3,7 @@ import { randomBytes } from "node:crypto";
 import { join } from "node:path";
 import { homedir } from "node:os";
 import type { BackendType } from "./session-types.js";
+import { getRecordingsDir } from "./constants.js";
 
 const DEFAULT_MAX_LINES = 100_000;
 const CLEANUP_INTERVAL_MS = 5 * 60 * 1000; // 5 minutes
@@ -120,10 +121,7 @@ export class RecorderManager {
     maxLines?: number;
   }) {
     this.globalEnabled = options?.globalEnabled ?? RecorderManager.resolveEnabled();
-    this.recordingsDir =
-      options?.recordingsDir ??
-      process.env.COMPANION_RECORDINGS_DIR ??
-      join(homedir(), ".companion", "recordings");
+    this.recordingsDir = options?.recordingsDir ?? getRecordingsDir();
     this.maxLines =
       options?.maxLines ??
       (Number(process.env.COMPANION_RECORDINGS_MAX_LINES) || DEFAULT_MAX_LINES);

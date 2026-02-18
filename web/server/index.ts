@@ -220,18 +220,46 @@ console.log(`  CLI WebSocket:     ws://localhost:${server.port}/ws/cli/:sessionI
 console.log(`  Browser WebSocket: ws://localhost:${server.port}/ws/browser/:sessionId`);
 
 if (process.env.NODE_ENV !== "production") {
-  console.log("Dev mode: frontend at http://localhost:5174");
+  console.log("");
+  console.log("  ======================================");
+  console.log("  DEVELOPMENT MODE");
+  console.log(`  Sessions:   ${sessionStore.directory}`);
+  console.log(`  Recordings: ${recorder.getRecordingsDir()}`);
+  console.log("  Sessions are isolated from production.");
+  console.log("  ======================================");
+  console.log("");
+  console.log("  Frontend at http://localhost:5174");
+
+  // Inform if production Companion is also running
+  fetch(`http://localhost:${DEFAULT_PORT_PROD}/api/backends`, {
+    signal: AbortSignal.timeout(1000),
+  })
+    .then((r) => {
+      if (r.ok) {
+        console.log(`  NOTE: Production Companion is also running on port ${DEFAULT_PORT_PROD}.`);
+        console.log(`        Sessions are isolated (different storage directories).`);
+      }
+    })
+    .catch(() => {
+      // Prod not running — nothing to report
+    });
 }
 
 // ── Cron scheduler ──────────────────────────────────────────────────────────
-cronScheduler.startAll();
+if (process.env.NODE_ENV === "production") {
+  cronScheduler.startAll();
+} else {
+  console.log("[server] Dev mode: cron scheduler disabled (only runs in production)");
+}
 
 // ── Companion Assistant ─────────────────────────────────────────────────────
 const assistantConfig = assistantManager.getConfig();
-if (assistantConfig.enabled) {
+if (assistantConfig.enabled && process.env.NODE_ENV === "production") {
   assistantManager.start().catch((e) => {
     console.error("[server] Failed to auto-start assistant:", e);
   });
+} else if (assistantConfig.enabled) {
+  console.log("[server] Dev mode: assistant auto-start disabled (use the UI to start manually)");
 }
 
 // ── Update checker ──────────────────────────────────────────────────────────

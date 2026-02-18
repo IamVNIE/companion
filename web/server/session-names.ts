@@ -4,12 +4,12 @@ import {
   writeFileSync,
   existsSync,
 } from "node:fs";
-import { join, dirname } from "node:path";
-import { homedir } from "node:os";
+import { dirname } from "node:path";
+import { getSessionNamesPath } from "./constants.js";
 
 // ─── Paths ──────────────────────────────────────────────────────────────────
 
-const DEFAULT_PATH = join(homedir(), ".companion", "session-names.json");
+const DEFAULT_PATH = getSessionNamesPath();
 
 // ─── Store ──────────────────────────────────────────────────────────────────
 
