@@ -6,7 +6,7 @@ import {
   cpSync,
   realpathSync,
 } from "node:fs";
-import { join, resolve } from "node:path";
+import { join, resolve, delimiter as pathDelimiter } from "node:path";
 import type { Subprocess } from "bun";
 import type { SessionStore } from "./session-store.js";
 import type { BackendType } from "./session-types.js";
@@ -599,7 +599,7 @@ export class CliLauncher {
       const binaryDir = resolve(binary, "..");
       const siblingNode = join(binaryDir, "node");
       const enrichedPath = getEnrichedPath();
-      const spawnPath = [binaryDir, ...enrichedPath.split(":")].filter(Boolean).join(":");
+      const spawnPath = [binaryDir, ...enrichedPath.split(pathDelimiter)].filter(Boolean).join(pathDelimiter);
 
       if (existsSync(siblingNode)) {
         let codexScript: string;

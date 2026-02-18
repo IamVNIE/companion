@@ -60,6 +60,8 @@ switch (command) {
     const forceForeground = process.argv.includes("--foreground");
     const launchedByInit = (() => {
       if (process.ppid === 1) return true;
+      // /proc is Linux-only; skip on other platforms
+      if (process.platform !== "linux") return false;
       // User-level systemd (systemctl --user) spawns services from a
       // per-user systemd process whose ppid != 1.  Detect it via /proc.
       try {
@@ -143,7 +145,14 @@ switch (command) {
       process.exit(1);
     }
     console.log("Tailing logs from ~/.companion/logs/");
-    const tail = spawn("tail", ["-f", logFile, errFile], { stdio: "inherit" });
+    let tail;
+    if (process.platform === "win32") {
+      // Use PowerShell Get-Content -Wait on Windows (tail -f equivalent)
+      const psCmd = `Get-Content -Path '${logFile}','${errFile}' -Wait -Tail 50`;
+      tail = spawn("powershell", ["-NoProfile", "-Command", psCmd], { stdio: "inherit" });
+    } else {
+      tail = spawn("tail", ["-f", logFile, errFile], { stdio: "inherit" });
+    }
     tail.on("exit", () => process.exit(0));
     break;
   }

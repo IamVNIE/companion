@@ -22,7 +22,12 @@ interface TerminalInstance {
   orphanTimer: ReturnType<typeof setTimeout> | null;
 }
 
+const isWindows = process.platform === "win32";
+
 function resolveShell(): string {
+  if (isWindows) {
+    return process.env.COMSPEC || "cmd.exe";
+  }
   if (process.env.SHELL && existsSync(process.env.SHELL)) return process.env.SHELL;
   if (existsSync("/bin/bash")) return "/bin/bash";
   return "/bin/sh";
@@ -50,7 +55,7 @@ export class TerminalManager {
           "-lc",
           "if command -v bash >/dev/null 2>&1; then exec bash -l; else exec sh -l; fi",
         ]
-      : [shell, "-l"];
+      : isWindows ? [shell] : [shell, "-l"];
 
     const proc = Bun.spawn(cmd, {
       cwd: containerId ? undefined : cwd,

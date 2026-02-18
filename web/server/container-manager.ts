@@ -370,10 +370,12 @@ export class ContainerManager {
   ): Promise<void> {
     validateContainerId(containerId);
 
-    const src = hostCwd.endsWith("/") ? `${hostCwd}.` : `${hostCwd}/.`;
-    const cmd = `docker cp ${shellEscape(src)} ${shellEscape(containerId)}:/workspace`;
+    // Normalize path: ensure it ends with "/." for docker cp content-copy semantics.
+    // On Windows, also handle trailing backslash.
+    const normalized = hostCwd.replace(/[/\\]$/, "");
+    const src = `${normalized}/.`;
 
-    const proc = Bun.spawn(["sh", "-c", cmd], {
+    const proc = Bun.spawn(["docker", "cp", src, `${containerId}:/workspace`], {
       stdout: "pipe",
       stderr: "pipe",
     });
