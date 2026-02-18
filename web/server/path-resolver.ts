@@ -11,8 +11,7 @@
 import { execSync } from "node:child_process";
 import { existsSync, readdirSync } from "node:fs";
 import { homedir } from "node:os";
-import { isAbsolute, join } from "node:path";
-import { isWindows, pathDelimiter, whichCommand } from "./platform.js";
+import { join } from "node:path";
 
 /**
  * Capture the user's full interactive shell PATH by spawning a login shell.
@@ -20,11 +19,6 @@ import { isWindows, pathDelimiter, whichCommand } from "./platform.js";
  * Falls back to probing common directories if shell sourcing fails.
  */
 export function captureUserShellPath(): string {
-  // On Windows, there's no login shell to source — use process.env.PATH directly
-  if (isWindows) {
-    return process.env.PATH || buildFallbackPath();
-  }
-
   try {
     const shell = process.env.SHELL || "/bin/bash";
     const captured = execSync(
@@ -52,61 +46,34 @@ export function captureUserShellPath(): string {
  */
 export function buildFallbackPath(): string {
   const home = homedir();
-  const candidates: string[] = [];
-
-  if (isWindows) {
-    // Windows-specific paths
-    const appData = process.env.APPDATA || join(home, "AppData", "Roaming");
-    const localAppData = process.env.LOCALAPPDATA || join(home, "AppData", "Local");
-    candidates.push(
-      // npm global installs
-      join(appData, "npm"),
-      // Bun
-      join(home, ".bun", "bin"),
-      // Cargo / Rust
-      join(home, ".cargo", "bin"),
-      // Volta (Node version manager)
-      join(home, ".volta", "bin"),
-      // Go
-      join(home, "go", "bin"),
-      // Deno
-      join(home, ".deno", "bin"),
-      // Python (common install locations)
-      join(localAppData, "Programs", "Python"),
-      // Scoop
-      join(home, "scoop", "shims"),
-    );
-  } else {
-    // Unix/macOS paths
-    candidates.push(
-      // Standard system paths
-      "/opt/homebrew/bin",
-      "/opt/homebrew/sbin",
-      "/usr/local/bin",
-      "/usr/bin",
-      "/bin",
-      "/usr/sbin",
-      "/sbin",
-      // Bun
-      join(home, ".bun", "bin"),
-      // Claude CLI / user-local installs
-      join(home, ".local", "bin"),
-      // Cargo / Rust
-      join(home, ".cargo", "bin"),
-      // Volta (Node version manager)
-      join(home, ".volta", "bin"),
-      // mise (formerly rtx)
-      join(home, ".local", "share", "mise", "shims"),
-      // pyenv
-      join(home, ".pyenv", "bin"),
-      join(home, ".pyenv", "shims"),
-      // Go
-      join(home, "go", "bin"),
-      "/usr/local/go/bin",
-      // Deno
-      join(home, ".deno", "bin"),
-    );
-  }
+  const candidates = [
+    // Standard system paths
+    "/opt/homebrew/bin",
+    "/opt/homebrew/sbin",
+    "/usr/local/bin",
+    "/usr/bin",
+    "/bin",
+    "/usr/sbin",
+    "/sbin",
+    // Bun
+    join(home, ".bun", "bin"),
+    // Claude CLI / user-local installs
+    join(home, ".local", "bin"),
+    // Cargo / Rust
+    join(home, ".cargo", "bin"),
+    // Volta (Node version manager)
+    join(home, ".volta", "bin"),
+    // mise (formerly rtx)
+    join(home, ".local", "share", "mise", "shims"),
+    // pyenv
+    join(home, ".pyenv", "bin"),
+    join(home, ".pyenv", "shims"),
+    // Go
+    join(home, "go", "bin"),
+    "/usr/local/go/bin",
+    // Deno
+    join(home, ".deno", "bin"),
+  ];
 
   // Probe nvm-managed node versions
   const nvmDir = process.env.NVM_DIR || join(home, ".nvm");
@@ -129,7 +96,7 @@ export function buildFallbackPath(): string {
     } catch { /* ignore */ }
   }
 
-  return [...new Set(candidates.filter((dir) => existsSync(dir)))].join(pathDelimiter);
+  return [...new Set(candidates.filter((dir) => existsSync(dir)))].join(":");
 }
 
 // ─── Enriched PATH (cached) ───────────────────────────────────────────────────
@@ -148,7 +115,7 @@ export function getEnrichedPath(): string {
   const userPath = captureUserShellPath();
 
   // Merge: user shell PATH first (takes precedence), then current process PATH
-  const allDirs = [...userPath.split(pathDelimiter), ...currentPath.split(pathDelimiter)];
+  const allDirs = [...userPath.split(":"), ...currentPath.split(":")];
   const seen = new Set<string>();
   const deduped: string[] = [];
   for (const dir of allDirs) {
@@ -158,7 +125,7 @@ export function getEnrichedPath(): string {
     }
   }
 
-  _cachedPath = deduped.join(pathDelimiter);
+  _cachedPath = deduped.join(":");
   return _cachedPath;
 }
 
@@ -174,21 +141,19 @@ export function _resetPathCache(): void {
  * Returns null if the binary is not found anywhere.
  */
 export function resolveBinary(name: string): string | null {
-  if (isAbsolute(name)) {
+  if (name.startsWith("/")) {
     return existsSync(name) ? name : null;
   }
 
   const enrichedPath = getEnrichedPath();
   try {
-    const cmd = whichCommand();
-    const resolved = execSync(`${cmd} ${name.replace(/[^a-zA-Z0-9._@/\\\-]/g, "")}`, {
+    const resolved = execSync(`which ${name.replace(/[^a-zA-Z0-9._@/-]/g, "")}`, {
+
       encoding: "utf-8",
       timeout: 5_000,
       env: { ...process.env, PATH: enrichedPath },
     }).trim();
-    // `where` on Windows may return multiple lines; take the first match
-    const firstLine = resolved.split(/\r?\n/)[0]?.trim();
-    return firstLine || null;
+    return resolved || null;
   } catch {
     return null;
   }
