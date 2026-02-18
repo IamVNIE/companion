@@ -39,7 +39,6 @@ export function Composer({ sessionId }: { sessionId: string }) {
   const fileInputRef = useRef<HTMLInputElement>(null);
   const menuRef = useRef<HTMLDivElement>(null);
   const cliConnected = useStore((s) => s.cliConnected);
-  const assistantSessionId = useStore((s) => s.assistantSessionId);
   const sessionData = useStore((s) => s.sessions.get(sessionId));
   const previousMode = useStore((s) => s.previousPermissionMode.get(sessionId) || "acceptEdits");
 
@@ -324,42 +323,31 @@ export function Composer({ sessionId }: { sessionId: string }) {
           )}
 
           <div className="flex items-end gap-2 px-2.5 py-2">
-            {/* Left: mode indicator — static for assistant (always bypass) */}
-            {sessionId === assistantSessionId ? (
-              <span className="mb-0.5 flex items-center gap-1.5 px-2.5 py-1.5 rounded-md text-[12px] font-semibold text-cc-muted bg-cc-hover/70 select-none shrink-0">
+            <button
+              onClick={toggleMode}
+              disabled={!isConnected || isCodex}
+              className={`mb-0.5 flex items-center gap-1.5 px-2.5 py-1.5 rounded-md text-[12px] font-semibold transition-all border select-none shrink-0 ${
+                !isConnected || isCodex
+                  ? "opacity-30 cursor-not-allowed text-cc-muted border-transparent"
+                  : isPlan
+                    ? "text-cc-primary border-cc-primary/30 bg-cc-primary/8 hover:bg-cc-primary/12 cursor-pointer"
+                    : "text-cc-muted border-cc-border hover:text-cc-fg hover:bg-cc-hover cursor-pointer"
+              }`}
+              title={isCodex ? "Mode is fixed for Codex sessions" : "Toggle mode (Shift+Tab)"}
+            >
+              {isPlan ? (
+                <svg viewBox="0 0 16 16" fill="currentColor" className="w-3.5 h-3.5">
+                  <rect x="3" y="3" width="3.5" height="10" rx="0.75" />
+                  <rect x="9.5" y="3" width="3.5" height="10" rx="0.75" />
+                </svg>
+              ) : (
                 <svg viewBox="0 0 16 16" fill="currentColor" className="w-3.5 h-3.5">
                   <path d="M2.5 4l4 4-4 4" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" fill="none" />
                   <path d="M8.5 4l4 4-4 4" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" fill="none" />
                 </svg>
-                <span>bypass</span>
-              </span>
-            ) : (
-              <button
-                onClick={toggleMode}
-                disabled={!isConnected || isCodex}
-                className={`mb-0.5 flex items-center gap-1.5 px-2.5 py-1.5 rounded-md text-[12px] font-semibold transition-all border select-none shrink-0 ${
-                  !isConnected || isCodex
-                    ? "opacity-30 cursor-not-allowed text-cc-muted border-transparent"
-                    : isPlan
-                    ? "text-cc-primary border-cc-primary/30 bg-cc-primary/8 hover:bg-cc-primary/12 cursor-pointer"
-                    : "text-cc-muted border-cc-border hover:text-cc-fg hover:bg-cc-hover cursor-pointer"
-                }`}
-                title={isCodex ? "Mode is fixed for Codex sessions" : "Toggle mode (Shift+Tab)"}
-              >
-                {isPlan ? (
-                  <svg viewBox="0 0 16 16" fill="currentColor" className="w-3.5 h-3.5">
-                    <rect x="3" y="3" width="3.5" height="10" rx="0.75" />
-                    <rect x="9.5" y="3" width="3.5" height="10" rx="0.75" />
-                  </svg>
-                ) : (
-                  <svg viewBox="0 0 16 16" fill="currentColor" className="w-3.5 h-3.5">
-                    <path d="M2.5 4l4 4-4 4" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" fill="none" />
-                    <path d="M8.5 4l4 4-4 4" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" fill="none" />
-                  </svg>
-                )}
-                <span>{modeLabel}</span>
-              </button>
-            )}
+              )}
+              <span>{modeLabel}</span>
+            </button>
 
             <textarea
               ref={textareaRef}
@@ -368,9 +356,7 @@ export function Composer({ sessionId }: { sessionId: string }) {
               onKeyDown={handleKeyDown}
               onPaste={handlePaste}
               placeholder={isConnected
-                ? (sessionId === assistantSessionId
-                  ? "Ask the assistant to manage sessions, schedule tasks..."
-                  : "Type a message... (/ for commands)")
+                ? "Type a message... (/ for commands)"
                 : "Waiting for CLI connection..."}
               disabled={!isConnected}
               rows={1}

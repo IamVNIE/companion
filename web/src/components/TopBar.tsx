@@ -41,7 +41,6 @@ export function TopBar() {
   const sessionStatus = useStore((s) => s.sessionStatus);
   const sessionNames = useStore((s) => s.sessionNames);
   const sdkSessions = useStore((s) => s.sdkSessions);
-  const assistantSessionId = useStore((s) => s.assistantSessionId);
   const sidebarOpen = useStore((s) => s.sidebarOpen);
   const setSidebarOpen = useStore((s) => s.setSidebarOpen);
   const taskPanelOpen = useStore((s) => s.taskPanelOpen);
@@ -99,21 +98,18 @@ export function TopBar() {
       ? "Open terminal in session container (Ctrl/Cmd+J)"
       : "Quick terminal (Ctrl/Cmd+J)";
   const status = currentSessionId ? (sessionStatus.get(currentSessionId) ?? null) : null;
-  const isAssistant = !!(currentSessionId && assistantSessionId && currentSessionId === assistantSessionId);
   const sessionName = currentSessionId
-    ? isAssistant
-      ? "Companion"
-      : (sessionNames?.get(currentSessionId) ||
-        sdkSessions.find((s) => s.sessionId === currentSessionId)?.name ||
-        `Session ${currentSessionId.slice(0, 8)}`)
+    ? (sessionNames?.get(currentSessionId) ||
+      sdkSessions.find((s) => s.sessionId === currentSessionId)?.name ||
+      `Session ${currentSessionId.slice(0, 8)}`)
     : null;
   const showWorkspaceControls = !!(currentSessionId && isSessionView);
   const workspaceTabs = useMemo(() => {
     const tabs: Array<"chat" | "diff" | "terminal"> = ["chat"];
-    if (!isAssistant) tabs.push("diff");
+    tabs.push("diff");
     tabs.push("terminal");
     return tabs;
-  }, [isAssistant]);
+  }, []);
 
   const activateWorkspaceTab = (tab: "chat" | "diff" | "terminal") => {
     if (tab === "terminal") {
@@ -216,26 +212,24 @@ export function TopBar() {
                   <span className="truncate">{sessionName || "Session"}</span>
                 </span>
               </button>
-              {!isAssistant && (
-                <button
-                  ref={diffTabRef}
-                  onClick={() => activateWorkspaceTab("diff")}
-                  className={`px-3.5 border text-[12px] font-semibold transition-colors cursor-pointer flex items-center gap-1.5 ${
-                    activeTab === "diff"
-                      ? "relative z-10 h-9 -mb-px text-cc-fg border-cc-border/80 border-b-transparent rounded-[14px_14px_0_0]"
-                      : "h-8 mb-px bg-transparent text-cc-muted border-transparent rounded-[8px_8px_0_0] hover:bg-cc-hover/70 hover:text-cc-fg"
-                  }`}
-                  style={activeTab === "diff" ? { backgroundColor: activeTabSurfaceColor } : undefined}
-                  aria-label="Diffs tab"
-                >
-                  Diffs
-                  {changedFilesCount > 0 && (
-                    <span className="text-[10px] bg-cc-warning text-white rounded-full min-w-[18px] h-[18px] px-1 flex items-center justify-center font-semibold leading-none">
-                      {changedFilesCount}
-                    </span>
-                  )}
-                </button>
-              )}
+              <button
+                ref={diffTabRef}
+                onClick={() => activateWorkspaceTab("diff")}
+                className={`px-3.5 border text-[12px] font-semibold transition-colors cursor-pointer flex items-center gap-1.5 ${
+                  activeTab === "diff"
+                    ? "relative z-10 h-9 -mb-px text-cc-fg border-cc-border/80 border-b-transparent rounded-[14px_14px_0_0]"
+                    : "h-8 mb-px bg-transparent text-cc-muted border-transparent rounded-[8px_8px_0_0] hover:bg-cc-hover/70 hover:text-cc-fg"
+                }`}
+                style={activeTab === "diff" ? { backgroundColor: activeTabSurfaceColor } : undefined}
+                aria-label="Diffs tab"
+              >
+                Diffs
+                {changedFilesCount > 0 && (
+                  <span className="text-[10px] bg-cc-warning text-white rounded-full min-w-[18px] h-[18px] px-1 flex items-center justify-center font-semibold leading-none">
+                    {changedFilesCount}
+                  </span>
+                )}
+              </button>
               <button
                 ref={shellTabRef}
                 onClick={() => activateWorkspaceTab("terminal")}
@@ -271,7 +265,7 @@ export function TopBar() {
         )}
 
         <div className="mb-1 flex items-center gap-1.5 shrink-0">
-          {cwd && !isAssistant && (
+          {cwd && (
             <button
               onClick={() => setClaudeMdOpen(true)}
               className={`flex items-center justify-center w-8 h-8 rounded-lg transition-colors cursor-pointer ${

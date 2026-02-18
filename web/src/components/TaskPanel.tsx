@@ -457,8 +457,6 @@ export function TaskPanel({ sessionId }: { sessionId: string }) {
   const sdkBackendType = sdk?.backendType;
   const taskPanelOpen = useStore((s) => s.taskPanelOpen);
   const setTaskPanelOpen = useStore((s) => s.setTaskPanelOpen);
-  const isAssistant = useStore((s) => s.assistantSessionId === sessionId);
-
   if (!taskPanelOpen) return null;
 
   const completedCount = tasks.filter((t) => t.status === "completed").length;
@@ -506,7 +504,7 @@ export function TaskPanel({ sessionId }: { sessionId: string }) {
         )}
 
         {/* Git branch snapshot — moved from composer for cleaner input surface */}
-        {!isAssistant && branch && (
+        {branch && (
           <div className="shrink-0 px-4 py-3 border-b border-cc-border space-y-2">
             <div className="flex items-center justify-between">
               <span className="text-[11px] text-cc-muted uppercase tracking-wider">
@@ -550,8 +548,8 @@ export function TaskPanel({ sessionId }: { sessionId: string }) {
           </div>
         )}
 
-        {/* GitHub PR status — hidden for assistant (no git context) */}
-        {!isAssistant && <GitHubPRSection sessionId={sessionId} />}
+        {/* GitHub PR status */}
+        <GitHubPRSection sessionId={sessionId} />
 
         {/* MCP servers */}
         <McpSection sessionId={sessionId} />

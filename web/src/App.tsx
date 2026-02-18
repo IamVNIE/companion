@@ -33,7 +33,6 @@ export default function App() {
   const taskPanelOpen = useStore((s) => s.taskPanelOpen);
   const homeResetKey = useStore((s) => s.homeResetKey);
   const activeTab = useStore((s) => s.activeTab);
-  const assistantSessionId = useStore((s) => s.assistantSessionId);
   const sessionCreating = useStore((s) => s.sessionCreating);
   const sessionCreatingBackend = useStore((s) => s.sessionCreatingBackend);
   const creationProgress = useStore((s) => s.creationProgress);
@@ -164,7 +163,7 @@ export default function App() {
                     )
                     : (
                       <SessionTerminalDock sessionId={currentSessionId} suppressPanel>
-                        {activeTab === "diff" && currentSessionId !== assistantSessionId
+                        {activeTab === "diff"
                           ? <DiffPanel sessionId={currentSessionId} />
                           : <ChatView sessionId={currentSessionId} />}
                       </SessionTerminalDock>
