@@ -1,14 +1,80 @@
 import { useStore } from "./store.js";
-import type { BrowserIncomingMessage, BrowserOutgoingMessage, ContentBlock, ChatMessage, TaskItem, SdkSessionInfo, McpServerConfig } from "./types.js";
+import type { BrowserIncomingMessage, BrowserOutgoingMessage, ContentBlock, ChatMessage, TaskItem, ProcessItem, ProcessStatus, SdkSessionInfo, McpServerConfig } from "./types.js";
 import { generateUniqueSessionName } from "./utils/names.js";
 import { playNotificationSound } from "./utils/notification-sound.js";
+import { getPreview } from "./components/ToolBlock.js";
+import type { ToolActivityEntry } from "./store/tasks-slice.js";
 
+const WS_RECONNECT_DELAY_MS = 2000;
 const sockets = new Map<string, WebSocket>();
 const reconnectTimers = new Map<string, ReturnType<typeof setTimeout>>();
 const lastSeqBySession = new Map<string, number>();
 const taskCounters = new Map<string, number>();
+const streamingPhaseBySession = new Map<string, "thinking" | "text">();
+const streamingDraftMessageIdBySession = new Map<string, string>();
+const pendingOutgoingBySession = new Map<string, BrowserOutgoingMessage[]>();
 /** Track processed tool_use IDs to prevent duplicate task creation */
 const processedToolUseIds = new Map<string, Set<string>>();
+
+function isSocketUsable(ws: WebSocket | undefined): boolean {
+  return !!ws && (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING);
+}
+
+function shouldReconnectSession(sessionId: string): boolean {
+  const store = useStore.getState();
+  const sdkSession = store.sdkSessions.find((s) => s.sessionId === sessionId);
+  if (sdkSession) return !sdkSession.archived;
+  // Fallback for freshly-created sessions that may not be in sdkSessions yet.
+  return store.currentSessionId === sessionId;
+}
+
+function getReconnectCandidates(): string[] {
+  const store = useStore.getState();
+  const ids = new Set<string>();
+  for (const s of store.sdkSessions) {
+    if (!s.archived) ids.add(s.sessionId);
+  }
+  if (store.currentSessionId) ids.add(store.currentSessionId);
+  return Array.from(ids);
+}
+
+// ── Page visibility handling ─────────────────────────────────────────────────
+// Mobile browsers (Android Chrome, iOS Safari) aggressively kill WebSocket
+// connections when the page is backgrounded. Without this handler, the frontend
+// enters a rapid connect/disconnect cycle: WS opens, browser kills it, 2s
+// reconnect timer fires, WS opens again, browser kills it again...
+//
+// Solution: when the page becomes hidden, pause all reconnect attempts. When
+// the page becomes visible again, immediately reconnect all active sessions.
+let pageHidden = typeof document !== "undefined" ? document.hidden : false;
+
+if (typeof document !== "undefined") {
+  document.addEventListener("visibilitychange", () => {
+    if (document.hidden) {
+      pageHidden = true;
+      // Cancel all pending reconnect timers — no point reconnecting while hidden
+      for (const [sessionId, timer] of reconnectTimers) {
+        clearTimeout(timer);
+        reconnectTimers.delete(sessionId);
+      }
+    } else {
+      pageHidden = false;
+      // Page is visible again — reconnect all known active sessions.
+      for (const sessionId of getReconnectCandidates()) {
+        // Re-check in case sdkSessions changed after candidate collection.
+        if (!shouldReconnectSession(sessionId)) continue;
+        const ws = sockets.get(sessionId);
+        if (!isSocketUsable(ws)) {
+          if (ws) {
+            try { ws.close(); } catch {}
+            sockets.delete(sessionId);
+          }
+          connectSession(sessionId);
+        }
+      }
+    }
+  });
+}
 
 function normalizePath(path: string): string {
   const isAbs = path.startsWith("/");
@@ -25,7 +91,7 @@ function normalizePath(path: string): string {
   return `${isAbs ? "/" : ""}${out.join("/")}`;
 }
 
-export function resolveSessionFilePath(filePath: string, cwd?: string): string {
+function resolveSessionFilePath(filePath: string, cwd?: string): string {
   if (filePath.startsWith("/")) return normalizePath(filePath);
   if (!cwd) return normalizePath(filePath);
   return normalizePath(`${cwd}/${filePath}`);
@@ -112,13 +178,76 @@ function extractChangedFilesFromBlocks(sessionId: string, blocks: ContentBlock[]
   const sessionCwd =
     store.sessions.get(sessionId)?.cwd ||
     store.sdkSessions.find((sdk) => sdk.sessionId === sessionId)?.cwd;
+  let dirty = false;
   for (const block of blocks) {
     if (block.type !== "tool_use") continue;
     const { name, input } = block;
     if ((name === "Edit" || name === "Write") && typeof input.file_path === "string") {
       const resolvedPath = resolveSessionFilePath(input.file_path, sessionCwd);
       if (isPathInSessionScope(resolvedPath, sessionCwd)) {
-        store.addChangedFile(sessionId, resolvedPath);
+        dirty = true;
+      }
+    }
+  }
+  if (dirty) store.bumpChangedFilesTick(sessionId);
+}
+
+/** Pending background Bash calls awaiting their tool_result (keyed by sessionId → toolUseId) */
+const pendingBackgroundBash = new Map<string, Map<string, { command: string; description: string; startedAt: number }>>();
+
+const BG_RESULT_REGEX = /Command running in background with ID:\s*(\S+)\.\s*Output is being written to:\s*(\S+)/;
+
+function extractProcessesFromBlocks(sessionId: string, blocks: ContentBlock[]) {
+  const store = useStore.getState();
+
+  for (const block of blocks) {
+    // Phase 1: Detect Bash tool_use with run_in_background
+    if (block.type === "tool_use" && block.name === "Bash") {
+      const input = block.input as Record<string, unknown>;
+      if (input.run_in_background === true) {
+        let sessionPending = pendingBackgroundBash.get(sessionId);
+        if (!sessionPending) {
+          sessionPending = new Map();
+          pendingBackgroundBash.set(sessionId, sessionPending);
+        }
+        sessionPending.set(block.id, {
+          command: (input.command as string) || "",
+          description: (input.description as string) || "",
+          startedAt: Date.now(),
+        });
+      }
+    }
+
+    // Phase 2: Match tool_result to a pending background Bash
+    if (block.type === "tool_result") {
+      const toolUseId = block.tool_use_id;
+      const sessionPending = pendingBackgroundBash.get(sessionId);
+      const pending = sessionPending?.get(toolUseId);
+      if (sessionPending && pending) {
+        const content = typeof block.content === "string"
+          ? block.content
+          : Array.isArray(block.content)
+            ? block.content.map((b) => ("text" in b ? (b as { text: string }).text : "")).join("")
+            : "";
+
+        const match = content.match(BG_RESULT_REGEX);
+        if (match) {
+          const processItem: ProcessItem = {
+            taskId: match[1],
+            toolUseId,
+            command: pending.command,
+            description: pending.description,
+            outputFile: match[2],
+            status: "running",
+            startedAt: pending.startedAt,
+          };
+          store.addProcess(sessionId, processItem);
+        }
+
+        sessionPending.delete(toolUseId);
+        if (sessionPending.size === 0) {
+          pendingBackgroundBash.delete(sessionId);
+        }
       }
     }
   }
@@ -130,14 +259,129 @@ function sendBrowserNotification(title: string, body: string, tag: string) {
   new Notification(title, { body, tag });
 }
 
+function summarizeSystemEvent(
+  event: Extract<BrowserIncomingMessage, { type: "system_event" }>["event"],
+): string | null {
+  if (event.subtype === "compact_boundary") {
+    return `Context compacted (${event.compact_metadata.trigger}, pre-tokens: ${event.compact_metadata.pre_tokens}).`;
+  }
+
+  if (event.subtype === "task_notification") {
+    const summary = event.summary ? ` ${event.summary}` : "";
+    return `Task ${event.status}: ${event.task_id}.${summary}`;
+  }
+
+  if (event.subtype === "files_persisted") {
+    const persisted = event.files.length;
+    const failed = event.failed.length;
+    if (failed > 0) {
+      return `Persisted ${persisted} file(s), ${failed} failed.`;
+    }
+    return `Persisted ${persisted} file(s).`;
+  }
+
+  if (event.subtype === "hook_started") {
+    return `Hook started: ${event.hook_name} (${event.hook_event}).`;
+  }
+
+  if (event.subtype === "hook_response") {
+    const exitCode = typeof event.exit_code === "number" ? ` (exit ${event.exit_code})` : "";
+    return `Hook ${event.outcome}: ${event.hook_name} (${event.hook_event})${exitCode}.`;
+  }
+
+  // hook_progress can be high-volume; keep it out of chat by default.
+  return null;
+}
+
 let idCounter = 0;
 let clientMsgCounter = 0;
 function nextId(): string {
   return `msg-${Date.now()}-${++idCounter}`;
 }
 
+function enqueueOutgoing(sessionId: string, msg: BrowserOutgoingMessage) {
+  const queued = pendingOutgoingBySession.get(sessionId) || [];
+  queued.push(msg);
+  pendingOutgoingBySession.set(sessionId, queued);
+}
+
+function flushQueuedOutgoing(sessionId: string, ws: WebSocket) {
+  const queued = pendingOutgoingBySession.get(sessionId);
+  if (!queued?.length || ws.readyState !== WebSocket.OPEN) return;
+  pendingOutgoingBySession.delete(sessionId);
+  for (const msg of queued) {
+    ws.send(JSON.stringify(msg));
+  }
+}
+
+/** Accumulated streaming content per session — thinking and text tracked separately */
+const streamingBlocksBySession = new Map<string, { thinking: string; text: string }>();
+
+function setStreamingDraftMessage(sessionId: string, content: string, phase?: "thinking" | "text") {
+  const store = useStore.getState();
+  const existing = store.messages.get(sessionId) || [];
+  const existingDraftId = streamingDraftMessageIdBySession.get(sessionId);
+
+  // Remove ALL orphaned streaming drafts (messages with isStreaming that aren't
+  // the tracked draft). This prevents duplicates when message_history merges or
+  // reconnects leave stale drafts in the array.
+  let messages = existing.filter(
+    (m) => !m.isStreaming || m.id === existingDraftId,
+  );
+
+  let draftIndex = -1;
+  if (existingDraftId) {
+    draftIndex = messages.findIndex((m) => m.id === existingDraftId);
+    if (draftIndex === -1) {
+      streamingDraftMessageIdBySession.delete(sessionId);
+    }
+  }
+
+  if (draftIndex === -1) {
+    const id = `stream-${sessionId}-${nextId()}`;
+    streamingDraftMessageIdBySession.set(sessionId, id);
+    messages = [...messages, {
+      id,
+      role: "assistant" as const,
+      content,
+      timestamp: Date.now(),
+      isStreaming: true,
+      streamingPhase: phase,
+    }];
+  } else {
+    messages = [...messages];
+    const prev = messages[draftIndex];
+    messages[draftIndex] = {
+      ...prev,
+      role: "assistant",
+      content,
+      isStreaming: true,
+      streamingPhase: phase,
+    };
+  }
+
+  store.setMessages(sessionId, messages);
+}
+
+function clearStreamingDraftMessage(sessionId: string) {
+  streamingDraftMessageIdBySession.delete(sessionId);
+
+  // Remove ALL streaming draft messages, not just the tracked one.
+  // This guards against orphaned drafts from reconnects or message_history merges.
+  const store = useStore.getState();
+  const existing = store.messages.get(sessionId) || [];
+  const next = existing.filter((m) => !m.isStreaming);
+  if (next.length !== existing.length) {
+    store.setMessages(sessionId, next);
+  }
+}
+
 function nextClientMsgId(): string {
   return `cmsg-${Date.now()}-${++clientMsgCounter}`;
+}
+
+export function createClientMessageId(): string {
+  return nextClientMsgId();
 }
 
 const IDEMPOTENT_OUTGOING_TYPES = new Set<BrowserOutgoingMessage["type"]>([
@@ -150,11 +394,13 @@ const IDEMPOTENT_OUTGOING_TYPES = new Set<BrowserOutgoingMessage["type"]>([
   "mcp_toggle",
   "mcp_reconnect",
   "mcp_set_servers",
+  "set_ai_validation",
 ]);
 
 function getWsUrl(sessionId: string): string {
   const proto = location.protocol === "https:" ? "wss:" : "ws:";
-  return `${proto}//${location.host}/ws/browser/${sessionId}`;
+  const token = localStorage.getItem("companion_auth_token") || "";
+  return `${proto}//${location.host}/ws/browser/${sessionId}?token=${encodeURIComponent(token)}`;
 }
 
 function getLastSeqStorageKey(sessionId: string): string {
@@ -200,12 +446,109 @@ function extractTextFromBlocks(blocks: ContentBlock[]): string {
     .join("\n");
 }
 
+/** Stable dedup key for a content block — ignores mutable metadata like `signature`. */
+function contentBlockKey(block: ContentBlock): string {
+  if (block.type === "thinking") return `thinking:${block.thinking}`;
+  if (block.type === "text") return `text:${block.text}`;
+  if (block.type === "tool_use") return `tool_use:${block.id}`;
+  if (block.type === "tool_result") return `tool_result:${block.tool_use_id}`;
+  return JSON.stringify(block);
+}
+
+function mergeContentBlocks(prev?: ContentBlock[], next?: ContentBlock[]): ContentBlock[] | undefined {
+  const prevBlocks = prev || [];
+  const nextBlocks = next || [];
+  if (prevBlocks.length === 0 && nextBlocks.length === 0) return undefined;
+
+  // Build a map of next blocks for in-place replacement of matching prev blocks.
+  const nextByKey = new Map<string, ContentBlock>();
+  for (const block of nextBlocks) {
+    nextByKey.set(contentBlockKey(block), block);
+  }
+
+  const merged: ContentBlock[] = [];
+  const seen = new Set<string>();
+
+  // Prev blocks first (preserves chronological order), replaced by next if matching.
+  for (const block of prevBlocks) {
+    const key = contentBlockKey(block);
+    if (seen.has(key)) continue;
+    seen.add(key);
+    merged.push(nextByKey.get(key) || block);
+  }
+  // Append any next blocks not already covered by prev.
+  for (const block of nextBlocks) {
+    const key = contentBlockKey(block);
+    if (seen.has(key)) continue;
+    seen.add(key);
+    merged.push(block);
+  }
+  return merged;
+}
+
+function buildToolActivityEntry(
+  toolUseId: string,
+  toolName: string,
+  input: Record<string, unknown>,
+  startedAt: number,
+  parentToolUseId?: string | null,
+): ToolActivityEntry {
+  return {
+    toolUseId,
+    toolName,
+    preview: getPreview(toolName, input),
+    startedAt,
+    elapsedSeconds: 0,
+    isError: false,
+    parentToolUseId: parentToolUseId || undefined,
+  };
+}
+
+function mergeAssistantMessage(previous: ChatMessage, incoming: ChatMessage): ChatMessage {
+  const mergedBlocks = mergeContentBlocks(previous.contentBlocks, incoming.contentBlocks);
+  const mergedContent = mergedBlocks && mergedBlocks.length > 0
+    ? extractTextFromBlocks(mergedBlocks)
+    : (incoming.content || previous.content);
+
+  return {
+    ...previous,
+    ...incoming,
+    content: mergedContent,
+    contentBlocks: mergedBlocks,
+    // Keep the original timestamp position when this is an in-place assistant update.
+    timestamp: previous.timestamp ?? incoming.timestamp,
+    // Explicitly clear stale streaming marker when incoming is final.
+    isStreaming: incoming.isStreaming,
+  };
+}
+
+function upsertAssistantMessage(sessionId: string, incoming: ChatMessage) {
+  const store = useStore.getState();
+  const existing = store.messages.get(sessionId) || [];
+  const index = existing.findIndex((m) => m.role === "assistant" && m.id === incoming.id);
+  if (index === -1) {
+    store.appendMessage(sessionId, incoming);
+    return;
+  }
+
+  const messages = [...existing];
+  messages[index] = mergeAssistantMessage(messages[index], incoming);
+  store.setMessages(sessionId, messages);
+}
+
 function handleMessage(sessionId: string, event: MessageEvent) {
   let data: BrowserIncomingMessage;
   try {
     data = JSON.parse(event.data);
   } catch {
+    console.warn(`[ws] Failed to parse incoming message for session ${sessionId}:`, event.data?.substring?.(0, 120));
     return;
+  }
+
+  // Promote to "connected" on first valid message (proves subscription succeeded)
+  const store = useStore.getState();
+  if (store.connectionStatus.get(sessionId) === "connecting") {
+    store.setConnectionStatus(sessionId, "connected");
   }
 
   handleParsedMessage(sessionId, data);
@@ -233,6 +576,7 @@ function handleParsedMessage(
       const existingSession = store.sessions.get(sessionId);
       store.addSession(data.session);
       store.setCliConnected(sessionId, true);
+      store.setCliReconnecting(sessionId, false);
       if (!existingSession) {
         store.setSessionStatus(sessionId, "idle");
       }
@@ -262,8 +606,19 @@ function handleParsedMessage(
         model: msg.model,
         stopReason: msg.stop_reason,
       };
-      store.appendMessage(sessionId, chatMsg);
+      // Clear any streaming draft first, then upsert the real message.
+      // Using clearStreamingDraftMessage + upsertAssistantMessage instead of
+      // finalizeStreamingDraftMessage avoids duplicates when the CLI sends
+      // multiple assistant messages for the same turn (e.g. thinking → text →
+      // tool_use) and streaming deltas create new drafts between them.
+      clearStreamingDraftMessage(sessionId);
+      upsertAssistantMessage(sessionId, chatMsg);
       store.setStreaming(sessionId, null);
+      streamingPhaseBySession.delete(sessionId);
+      // Reset streaming text accumulators so subsequent deltas in the same
+      // turn don't re-show content that was already committed in the real
+      // assistant message (prevents the "3-4 duplicate lines" streaming bug).
+      streamingBlocksBySession.delete(sessionId);
       // Clear progress only for completed tools (tool_result blocks), not all tools.
       // Blanket clear would cause flickering during concurrent tool execution.
       if (msg.content?.length) {
@@ -280,10 +635,33 @@ function handleParsedMessage(
         store.setStreamingStats(sessionId, { startedAt: Date.now() });
       }
 
+      // Track tool activity for execution timeline
+      if (msg.content?.length) {
+        for (const block of msg.content) {
+          if (block.type === "tool_use") {
+            const input = (block as { input?: Record<string, unknown> }).input || {};
+            store.addToolActivity(sessionId, buildToolActivityEntry(
+              block.id,
+              block.name,
+              input,
+              data.timestamp || Date.now(),
+              data.parent_tool_use_id,
+            ));
+          }
+          if (block.type === "tool_result") {
+            store.updateToolActivity(sessionId, block.tool_use_id, {
+              completedAt: Date.now(),
+              isError: Boolean(block.is_error),
+            });
+          }
+        }
+      }
+
       // Extract tasks and changed files from tool_use content blocks
       if (msg.content?.length) {
         extractTasksFromBlocks(sessionId, msg.content);
         extractChangedFilesFromBlocks(sessionId, msg.content);
+        extractProcessesFromBlocks(sessionId, msg.content);
       }
 
       break;
@@ -294,6 +672,9 @@ function handleParsedMessage(
       if (evt && typeof evt === "object") {
         // message_start → mark generation start time
         if (evt.type === "message_start") {
+          streamingPhaseBySession.delete(sessionId);
+          streamingBlocksBySession.delete(sessionId);
+          clearStreamingDraftMessage(sessionId);
           if (!store.streamingStartedAt.has(sessionId)) {
             store.setStreamingStats(sessionId, { startedAt: Date.now(), outputTokens: 0 });
           }
@@ -303,8 +684,28 @@ function handleParsedMessage(
         if (evt.type === "content_block_delta") {
           const delta = evt.delta as Record<string, unknown> | undefined;
           if (delta?.type === "text_delta" && typeof delta.text === "string") {
-            const current = store.streaming.get(sessionId) || "";
-            store.setStreaming(sessionId, current + delta.text);
+            const parts = streamingBlocksBySession.get(sessionId) || { thinking: "", text: "" };
+            // Reset thinking accumulator on phase transition so that if
+            // thinking resumes later it starts fresh (avoids showing stale
+            // concatenated thinking from a previous block).
+            if (streamingPhaseBySession.get(sessionId) === "thinking") {
+              parts.thinking = "";
+            }
+            parts.text += delta.text;
+            streamingBlocksBySession.set(sessionId, parts);
+            streamingPhaseBySession.set(sessionId, "text");
+            // Show only the response text in the streaming draft
+            store.setStreaming(sessionId, parts.text);
+            setStreamingDraftMessage(sessionId, parts.text, "text");
+          }
+          if (delta?.type === "thinking_delta" && typeof delta.thinking === "string") {
+            const parts = streamingBlocksBySession.get(sessionId) || { thinking: "", text: "" };
+            parts.thinking += delta.thinking;
+            streamingBlocksBySession.set(sessionId, parts);
+            streamingPhaseBySession.set(sessionId, "thinking");
+            // Show thinking text directly as faded inline text
+            store.setStreaming(sessionId, parts.thinking);
+            setStreamingDraftMessage(sessionId, parts.thinking, "thinking");
           }
         }
 
@@ -320,6 +721,10 @@ function handleParsedMessage(
     }
 
     case "result": {
+      // Flush processed tool IDs at end of turn — deduplication only needed
+      // within a single turn. Preserves memory in long-running sessions.
+      processedToolUseIds.delete(sessionId);
+
       const r = data.data;
       const sessionUpdates: Partial<{ total_cost_usd: number; num_turns: number; context_used_percent: number; total_lines_added: number; total_lines_removed: number }> = {
         total_cost_usd: r.total_cost_usd,
@@ -344,7 +749,10 @@ function handleParsedMessage(
         }
       }
       store.updateSession(sessionId, sessionUpdates);
+      clearStreamingDraftMessage(sessionId);
       store.setStreaming(sessionId, null);
+      streamingPhaseBySession.delete(sessionId);
+      streamingBlocksBySession.delete(sessionId);
       store.setStreamingStats(sessionId, null);
       store.clearToolProgress(sessionId);
       store.setSessionStatus(sessionId, "idle");
@@ -387,6 +795,7 @@ function handleParsedMessage(
         }];
         extractTasksFromBlocks(sessionId, permBlocks);
         extractChangedFilesFromBlocks(sessionId, permBlocks);
+        extractProcessesFromBlocks(sessionId, permBlocks);
       }
       break;
     }
@@ -396,20 +805,77 @@ function handleParsedMessage(
       break;
     }
 
+    case "permission_auto_resolved": {
+      store.addAiResolvedPermission(sessionId, {
+        request: data.request,
+        behavior: data.behavior,
+        reason: data.reason,
+        timestamp: Date.now(),
+      });
+      break;
+    }
+
     case "tool_progress": {
       store.setToolProgress(sessionId, data.tool_use_id, {
         toolName: data.tool_name,
+        elapsedSeconds: data.elapsed_time_seconds,
+      });
+      // Also update tool activity elapsed time
+      store.updateToolActivity(sessionId, data.tool_use_id, {
         elapsedSeconds: data.elapsed_time_seconds,
       });
       break;
     }
 
     case "tool_use_summary": {
+      // For Claude Code, tool_use content blocks in the assistant message
+      // already render the tool call via ToolBlock/EditBlock — rendering a
+      // duplicate system message would be redundant.
+      // For Codex, tool_use blocks may not be present, so we still render.
+      const backend = store.sdkSessions.find(
+        (s) => s.sessionId === sessionId,
+      )?.backendType;
+      if (backend === "codex") {
+        store.appendMessage(sessionId, {
+          id: nextId(),
+          role: "system",
+          content: data.summary,
+          timestamp: Date.now(),
+        });
+      }
+      break;
+    }
+
+    case "user_message": {
+      store.appendMessage(sessionId, {
+        id: data.id || nextId(),
+        role: "user",
+        content: data.content,
+        timestamp: data.timestamp || Date.now(),
+      });
+      break;
+    }
+
+    case "system_event": {
+      // Update structured process state from task_notification
+      if (data.event?.subtype === "task_notification") {
+        const { task_id, status, summary: taskSummary } = data.event;
+        if (task_id && status) {
+          store.updateProcess(sessionId, task_id, {
+            status: status as ProcessStatus,
+            completedAt: Date.now(),
+            summary: taskSummary || undefined,
+          });
+        }
+      }
+
+      const summary = summarizeSystemEvent(data.event);
+      if (!summary) break;
       store.appendMessage(sessionId, {
         id: nextId(),
         role: "system",
-        content: data.summary,
-        timestamp: Date.now(),
+        content: summary,
+        timestamp: data.timestamp || Date.now(),
       });
       break;
     }
@@ -445,14 +911,40 @@ function handleParsedMessage(
       break;
     }
 
+    case "session_phase": {
+      const phase = data.phase;
+      if (phase === "terminated") {
+        store.setCliConnected(sessionId, false);
+        store.setCliReconnecting(sessionId, false);
+        store.setSessionStatus(sessionId, null);
+      } else if (phase === "reconnecting") {
+        store.setCliConnected(sessionId, false);
+        store.setCliReconnecting(sessionId, true);
+        store.setSessionStatus(sessionId, null);
+      } else if (phase === "starting" || phase === "initializing") {
+        store.setCliConnected(sessionId, false);
+        store.setCliReconnecting(sessionId, true);
+      } else {
+        store.setCliConnected(sessionId, true);
+        store.setCliReconnecting(sessionId, false);
+        if (phase === "ready") store.setSessionStatus(sessionId, "idle");
+        else if (phase === "streaming") store.setSessionStatus(sessionId, "running");
+        else if (phase === "compacting") store.setSessionStatus(sessionId, "compacting");
+        else if (phase === "awaiting_permission") store.setSessionStatus(sessionId, "running");
+      }
+      break;
+    }
+
     case "cli_disconnected": {
       store.setCliConnected(sessionId, false);
+      store.setCliReconnecting(sessionId, false);
       store.setSessionStatus(sessionId, null);
       break;
     }
 
     case "cli_connected": {
       store.setCliConnected(sessionId, true);
+      store.setCliReconnecting(sessionId, false);
       break;
     }
 
@@ -479,6 +971,7 @@ function handleParsedMessage(
 
     case "message_history": {
       const chatMessages: ChatMessage[] = [];
+      const toolActivityById = new Map<string, ToolActivityEntry>();
       for (let i = 0; i < data.messages.length; i++) {
         const histMsg = data.messages[i];
         if (histMsg.type === "user_message") {
@@ -491,7 +984,7 @@ function handleParsedMessage(
         } else if (histMsg.type === "assistant") {
           const msg = histMsg.message;
           const textContent = extractTextFromBlocks(msg.content);
-          chatMessages.push({
+          const assistantMsg: ChatMessage = {
             id: msg.id,
             role: "assistant",
             content: textContent,
@@ -500,11 +993,49 @@ function handleParsedMessage(
             parentToolUseId: histMsg.parent_tool_use_id,
             model: msg.model,
             stopReason: msg.stop_reason,
-          });
-          // Also extract tasks and changed files from history
+          };
+          const existingIndex = chatMessages.findIndex((m) => m.role === "assistant" && m.id === assistantMsg.id);
+          if (existingIndex === -1) {
+            chatMessages.push(assistantMsg);
+          } else {
+            chatMessages[existingIndex] = mergeAssistantMessage(chatMessages[existingIndex], assistantMsg);
+          }
+          // Also extract tasks, changed files, and background processes from history
           if (msg.content?.length) {
             extractTasksFromBlocks(sessionId, msg.content);
             extractChangedFilesFromBlocks(sessionId, msg.content);
+            extractProcessesFromBlocks(sessionId, msg.content);
+            const baseTimestamp = histMsg.timestamp || Date.now();
+            for (const block of msg.content) {
+              if (block.type === "tool_use") {
+                const input = (block as { input?: Record<string, unknown> }).input || {};
+                const existing = toolActivityById.get(block.id);
+                toolActivityById.set(
+                  block.id,
+                  existing ?? buildToolActivityEntry(
+                    block.id,
+                    block.name,
+                    input,
+                    baseTimestamp,
+                    histMsg.parent_tool_use_id,
+                  ),
+                );
+              }
+              if (block.type === "tool_result") {
+                const existing = toolActivityById.get(block.tool_use_id);
+                if (existing) {
+                  toolActivityById.set(block.tool_use_id, {
+                    ...existing,
+                    completedAt: baseTimestamp,
+                    isError: existing.isError || Boolean(block.is_error),
+                    elapsedSeconds: Math.max(
+                      existing.elapsedSeconds,
+                      existing.completedAt ? existing.elapsedSeconds : Math.max(0, (baseTimestamp - existing.startedAt) / 1000),
+                    ),
+                  });
+                }
+              }
+            }
           }
         } else if (histMsg.type === "result") {
           const r = histMsg.data;
@@ -516,6 +1047,36 @@ function handleParsedMessage(
               timestamp: Date.now(),
             });
           }
+          // Track cost/turns from history result, same as the live result handler
+          const resultUpdates: Partial<{ total_cost_usd: number; num_turns: number; context_used_percent: number; total_lines_added: number; total_lines_removed: number }> = {
+            total_cost_usd: r.total_cost_usd,
+            num_turns: r.num_turns,
+          };
+          if (typeof r.total_lines_added === "number") {
+            resultUpdates.total_lines_added = r.total_lines_added;
+          }
+          if (typeof r.total_lines_removed === "number") {
+            resultUpdates.total_lines_removed = r.total_lines_removed;
+          }
+          if (r.modelUsage) {
+            for (const usage of Object.values(r.modelUsage)) {
+              if ((usage as { contextWindow: number; inputTokens: number; outputTokens: number }).contextWindow > 0) {
+                const u = usage as { contextWindow: number; inputTokens: number; outputTokens: number };
+                const pct = Math.round(((u.inputTokens + u.outputTokens) / u.contextWindow) * 100);
+                resultUpdates.context_used_percent = Math.max(0, Math.min(pct, 100));
+              }
+            }
+          }
+          store.updateSession(sessionId, resultUpdates);
+        } else if (histMsg.type === "system_event") {
+          const summary = summarizeSystemEvent(histMsg.event);
+          if (!summary) continue;
+          chatMessages.push({
+            id: `hist-system-event-${i}`,
+            role: "system",
+            content: summary,
+            timestamp: histMsg.timestamp || Date.now(),
+          });
         }
       }
       if (chatMessages.length > 0) {
@@ -524,17 +1085,38 @@ function handleParsedMessage(
           // Initial connect: history is the full truth
           store.setMessages(sessionId, chatMessages);
         } else {
-          // Reconnect: merge history with live messages, dedup by ID
-          const existingIds = new Set(existing.map((m) => m.id));
-          const newFromHistory = chatMessages.filter((m) => !existingIds.has(m.id));
-          if (newFromHistory.length > 0) {
-            // Merge and sort by timestamp to maintain chronological order
-            const merged = [...newFromHistory, ...existing].sort(
-              (a, b) => (a.timestamp ?? 0) - (b.timestamp ?? 0),
-            );
-            store.setMessages(sessionId, merged);
+          // Reconnect: merge history with live messages, upserting duplicate assistant IDs.
+          const merged = [...existing];
+          for (const incoming of chatMessages) {
+            const idx = merged.findIndex((m) => m.id === incoming.id);
+            if (idx === -1) {
+              merged.push(incoming);
+              continue;
+            }
+            const current = merged[idx];
+            if (current.role === "assistant" && incoming.role === "assistant") {
+              merged[idx] = mergeAssistantMessage(current, incoming);
+            } else {
+              merged[idx] = incoming;
+            }
           }
+          merged.sort((a, b) => (a.timestamp ?? 0) - (b.timestamp ?? 0));
+          store.setMessages(sessionId, merged);
         }
+      }
+      store.setToolActivity(sessionId, Array.from(toolActivityById.values()).sort((a, b) => a.startedAt - b.startedAt));
+      // Fix: if the last history message is a `result`, the session's last turn
+      // is complete. Clear any stale streaming state that event_replay might not
+      // correct (e.g. when `result` was pruned from the 600-event buffer).
+      const lastHistMsg = data.messages[data.messages.length - 1];
+      if (lastHistMsg?.type === "result") {
+        clearStreamingDraftMessage(sessionId);
+        store.setStreaming(sessionId, null);
+        streamingPhaseBySession.delete(sessionId);
+        streamingBlocksBySession.delete(sessionId);
+        store.setStreamingStats(sessionId, null);
+        store.clearToolProgress(sessionId);
+        store.setSessionStatus(sessionId, "idle");
       }
       break;
     }
@@ -561,7 +1143,12 @@ function handleParsedMessage(
 }
 
 export function connectSession(sessionId: string) {
-  if (sockets.has(sessionId)) return;
+  const existing = sockets.get(sessionId);
+  if (isSocketUsable(existing)) return;
+  if (existing) {
+    try { existing.close(); } catch {}
+    sockets.delete(sessionId);
+  }
 
   const store = useStore.getState();
   store.setConnectionStatus(sessionId, "connecting");
@@ -570,9 +1157,11 @@ export function connectSession(sessionId: string) {
   sockets.set(sessionId, ws);
 
   ws.onopen = () => {
-    useStore.getState().setConnectionStatus(sessionId, "connected");
+    // Stay in "connecting" until we receive the first message from the server,
+    // proving the subscription succeeded. handleMessage promotes to "connected".
     const lastSeq = getLastSeq(sessionId);
     ws.send(JSON.stringify({ type: "session_subscribe", last_seq: lastSeq }));
+    flushQueuedOutgoing(sessionId, ws);
     // Clear any reconnect timer
     const timer = reconnectTimers.get(sessionId);
     if (timer) {
@@ -584,6 +1173,8 @@ export function connectSession(sessionId: string) {
   ws.onmessage = (event) => handleMessage(sessionId, event);
 
   ws.onclose = () => {
+    // Guard against stale close events from a replaced socket.
+    if (sockets.get(sessionId) !== ws) return;
     sockets.delete(sessionId);
     useStore.getState().setConnectionStatus(sessionId, "disconnected");
     scheduleReconnect(sessionId);
@@ -596,15 +1187,16 @@ export function connectSession(sessionId: string) {
 
 function scheduleReconnect(sessionId: string) {
   if (reconnectTimers.has(sessionId)) return;
+  // Don't schedule reconnect when page is hidden — mobile browsers will just
+  // kill the new connection too, creating a wasteful connect/disconnect cycle.
+  // The visibilitychange handler will reconnect when the page becomes visible.
+  if (pageHidden) return;
   const timer = setTimeout(() => {
     reconnectTimers.delete(sessionId);
-    const store = useStore.getState();
-    // Reconnect any active (non-archived) session
-    const sdkSession = store.sdkSessions.find((s) => s.sessionId === sessionId);
-    if (sdkSession && !sdkSession.archived) {
-      connectSession(sessionId);
-    }
-  }, 2000);
+    // Re-check visibility — page may have been hidden during the delay
+    if (pageHidden) return;
+    if (shouldReconnectSession(sessionId)) connectSession(sessionId);
+  }, WS_RECONNECT_DELAY_MS);
   reconnectTimers.set(sessionId, timer);
 }
 
@@ -619,8 +1211,15 @@ export function disconnectSession(sessionId: string) {
     ws.close();
     sockets.delete(sessionId);
   }
+  useStore.getState().setConnectionStatus(sessionId, "disconnected");
   processedToolUseIds.delete(sessionId);
+  pendingBackgroundBash.delete(sessionId);
   taskCounters.delete(sessionId);
+  streamingPhaseBySession.delete(sessionId);
+  streamingDraftMessageIdBySession.delete(sessionId);
+  streamingBlocksBySession.delete(sessionId);
+  lastSeqBySession.delete(sessionId);
+  pendingOutgoingBySession.delete(sessionId);
 }
 
 export function disconnectAll() {
@@ -630,6 +1229,9 @@ export function disconnectAll() {
 }
 
 export function connectAllSessions(sessions: SdkSessionInfo[]) {
+  // Skip connection attempts when page is hidden — mobile browsers kill
+  // backgrounded WS connections, so connecting here would just cycle.
+  if (pageHidden) return;
   for (const s of sessions) {
     if (!s.archived) {
       connectSession(s.sessionId);
@@ -657,7 +1259,8 @@ export function waitForConnection(sessionId: string): Promise<void> {
 export function sendToSession(sessionId: string, msg: BrowserOutgoingMessage) {
   const ws = sockets.get(sessionId);
   let outgoing: BrowserOutgoingMessage = msg;
-  if (IDEMPOTENT_OUTGOING_TYPES.has(msg.type)) {
+  const isIdempotent = IDEMPOTENT_OUTGOING_TYPES.has(msg.type);
+  if (isIdempotent) {
     switch (msg.type) {
       case "user_message":
       case "permission_response":
@@ -668,14 +1271,21 @@ export function sendToSession(sessionId: string, msg: BrowserOutgoingMessage) {
       case "mcp_toggle":
       case "mcp_reconnect":
       case "mcp_set_servers":
+      case "set_ai_validation":
         if (!msg.client_msg_id) {
           outgoing = { ...msg, client_msg_id: nextClientMsgId() };
         }
         break;
     }
   }
+
   if (ws?.readyState === WebSocket.OPEN) {
     ws.send(JSON.stringify(outgoing));
+    return;
+  }
+
+  if (isIdempotent) {
+    enqueueOutgoing(sessionId, outgoing);
   }
 }
 
@@ -693,4 +1303,15 @@ export function sendMcpReconnect(sessionId: string, serverName: string) {
 
 export function sendMcpSetServers(sessionId: string, servers: Record<string, McpServerConfig>) {
   sendToSession(sessionId, { type: "mcp_set_servers", servers });
+}
+
+export function sendSetAiValidation(
+  sessionId: string,
+  settings: {
+    aiValidationEnabled?: boolean | null;
+    aiValidationAutoApprove?: boolean | null;
+    aiValidationAutoDeny?: boolean | null;
+  },
+) {
+  sendToSession(sessionId, { type: "set_ai_validation", ...settings });
 }

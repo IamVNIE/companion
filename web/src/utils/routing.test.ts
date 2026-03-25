@@ -1,6 +1,11 @@
 // @vitest-environment jsdom
 import { describe, it, expect, beforeEach, vi } from "vitest";
-import { parseHash, sessionHash, navigateToSession, navigateHome } from "./routing.js";
+import {
+  parseHash,
+  sessionHash,
+  navigateToSession,
+  navigateHome,
+} from "./routing.js";
 
 describe("parseHash", () => {
   it("returns home for empty string", () => {
@@ -19,16 +24,33 @@ describe("parseHash", () => {
     expect(parseHash("#/settings")).toEqual({ page: "settings" });
   });
 
+  it("parses integrations route", () => {
+    expect(parseHash("#/integrations")).toEqual({ page: "integrations" });
+  });
+
+  it("parses linear integration route", () => {
+    expect(parseHash("#/integrations/linear")).toEqual({ page: "integration-linear" });
+  });
+
   it("parses terminal route", () => {
     expect(parseHash("#/terminal")).toEqual({ page: "terminal" });
+  });
+
+  it("parses prompts route", () => {
+    expect(parseHash("#/prompts")).toEqual({ page: "prompts" });
   });
 
   it("parses environments route", () => {
     expect(parseHash("#/environments")).toEqual({ page: "environments" });
   });
 
-  it("parses scheduled route", () => {
-    expect(parseHash("#/scheduled")).toEqual({ page: "scheduled" });
+  it("parses docker-builder route as home (removed)", () => {
+    // docker-builder route was removed; unknown routes map to home
+    expect(parseHash("#/docker-builder")).toEqual({ page: "home" });
+  });
+
+  it("parses scheduled route (redirects to agents)", () => {
+    expect(parseHash("#/scheduled")).toEqual({ page: "agents" });
   });
 
   it("parses playground route", () => {

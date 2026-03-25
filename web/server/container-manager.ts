@@ -13,15 +13,23 @@ import { tmpdir } from "node:os";
 // Types
 // ---------------------------------------------------------------------------
 
+export interface ContainerPortSpec {
+  port: number;
+  /** Host IP to bind to (default: 0.0.0.0). Use "127.0.0.1" for localhost-only. */
+  hostIp?: string;
+}
+
 export interface ContainerConfig {
   /** Docker image to use (e.g. "the-companion:latest", "node:22-slim") */
   image: string;
-  /** Container ports to expose (e.g. [3000, 8080]) */
-  ports: number[];
+  /** Container ports to expose (e.g. [3000, 8080] or [{ port: 6080, hostIp: "127.0.0.1" }]) */
+  ports: (number | ContainerPortSpec)[];
   /** Extra volume mounts in "host:container[:opts]" format */
   volumes?: string[];
   /** Extra env vars to inject into the container */
   env?: Record<string, string>;
+  /** Run container in privileged mode (required for Docker-in-Docker) */
+  privileged?: boolean;
 }
 
 export interface PortMapping {
@@ -52,6 +60,7 @@ const EXEC_OPTS: ExecSyncOptionsWithStringEncoding = {
 const QUICK_EXEC_TIMEOUT_MS = 8_000;
 const STANDARD_EXEC_TIMEOUT_MS = 30_000;
 const CONTAINER_BOOT_TIMEOUT_MS = 20_000;
+const WORKSPACE_COPY_TIMEOUT_MS = 15 * 60_000; // 15 min for large repos
 const IMAGE_PULL_TIMEOUT_MS = 300_000; // 5 min for pulling images
 
 const DOCKER_REGISTRY = "docker.io/stangirard";
@@ -139,7 +148,8 @@ export class ContainerManager {
     const homedir = process.env.HOME || process.env.USERPROFILE || "/root";
 
     // Validate port numbers
-    for (const port of config.ports) {
+    for (const portSpec of config.ports) {
+      const port = typeof portSpec === "number" ? portSpec : portSpec.port;
       if (!Number.isInteger(port) || port < 1 || port > 65535) {
         throw new Error(`Invalid port number: ${port} (must be 1-65535)`);
       }
@@ -156,6 +166,8 @@ export class ContainerManager {
     const args: string[] = [
       "docker", "create",
       "--name", name,
+      // Enable Docker-in-Docker when privileged mode is requested
+      ...(config.privileged ? ["--privileged"] : []),
       // Ensure host.docker.internal resolves (automatic on Mac/Win Docker
       // Desktop, but required explicitly on Linux)
       "--add-host=host.docker.internal:host-gateway",
@@ -171,15 +183,20 @@ export class ContainerManager {
       "-w", "/workspace",
     ];
 
-    // Mount host .gitconfig so git user.name/email are available for commits
+    // Mount host .gitconfig at a staging path (not /root/.gitconfig) so the
+    // container keeps a writable global git config. seedGitAuth() copies
+    // user.name / user.email from the staged file into /root/.gitconfig and
+    // can also write container-specific overrides (e.g. gpgsign=false).
     const gitconfigPath = join(homedir, ".gitconfig");
     if (existsSync(gitconfigPath)) {
-      args.push("-v", `${gitconfigPath}:/root/.gitconfig:ro`);
+      args.push("-v", `${gitconfigPath}:/companion-host-gitconfig:ro`);
     }
 
-    // Port mappings: -p 0:{containerPort}
-    for (const port of config.ports) {
-      args.push("-p", `0:${port}`);
+    // Port mappings: -p [hostIp:]0:{containerPort}
+    for (const portSpec of config.ports) {
+      const port = typeof portSpec === "number" ? portSpec : portSpec.port;
+      const hostIp = typeof portSpec === "number" ? undefined : portSpec.hostIp;
+      args.push("-p", hostIp ? `${hostIp}:0:${port}` : `0:${port}`);
     }
 
     // Extra volumes
@@ -336,15 +353,29 @@ export class ContainerManager {
       ]);
     } catch { /* best-effort */ }
 
-    // Disable GPG/SSH commit signing — host signing tools (1Password, GPG agent)
-    // aren't available inside the container and would cause git commit to fail.
-    // Also rewrite SSH git remotes to HTTPS so `gh` credential helper handles auth
-    // (containers don't have the host's SSH keys).
+    // Copy host git identity (user.name, user.email) from the staged
+    // read-only .gitconfig into the container's writable global config,
+    // then apply container-specific overrides (disable GPG signing, mark
+    // /workspace as safe, rewrite SSH remotes to HTTPS since containers
+    // lack host SSH keys).
     try {
       this.execInContainer(containerId, [
         "sh", "-lc",
         [
+          // Import user.name and user.email from host gitconfig (if mounted)
+          "if [ -f /companion-host-gitconfig ]; then " +
+            "NAME=$(git config -f /companion-host-gitconfig user.name 2>/dev/null); " +
+            "EMAIL=$(git config -f /companion-host-gitconfig user.email 2>/dev/null); " +
+            '[ -n "$NAME" ] && git config --global user.name "$NAME"; ' +
+            '[ -n "$EMAIL" ] && git config --global user.email "$EMAIL"; ' +
+          "fi",
+          // Disable GPG/SSH commit signing — host tools (1Password, GPG agent)
+          // aren't available inside the container.
           "git config --global commit.gpgsign false 2>/dev/null",
+          // Mark /workspace as safe — the workspace volume may be owned by a
+          // different uid (e.g. ubuntu) than the container user (root), which
+          // triggers git's "dubious ownership" check.
+          "git config --global safe.directory /workspace 2>/dev/null",
           // Rewrite git@github.com:org/repo → https://github.com/org/repo for all remotes
           "cd /workspace 2>/dev/null && " +
             "git remote -v 2>/dev/null | grep 'git@github.com:' | awk '{print $1}' | sort -u | " +
@@ -361,8 +392,8 @@ export class ContainerManager {
 
   /**
    * Copy host workspace files into a running container's /workspace volume.
-   * Uses `docker cp` which works with both running and stopped containers.
-   * The trailing `/.` ensures directory contents are copied (not the directory itself).
+   * Uses a tar stream piped into `docker exec` for better throughput on Docker
+   * Desktop (macOS) while preserving file structure and dotfiles.
    */
   async copyWorkspaceToContainer(
     containerId: string,
@@ -370,22 +401,33 @@ export class ContainerManager {
   ): Promise<void> {
     validateContainerId(containerId);
 
-    // Normalize path: ensure it ends with "/." for docker cp content-copy semantics.
-    // On Windows, also handle trailing backslash.
-    const normalized = hostCwd.replace(/[/\\]$/, "");
-    const src = `${normalized}/.`;
+    const cmd = [
+      "set -o pipefail",
+      `COPYFILE_DISABLE=1 tar -C ${shellEscape(hostCwd)} -cf - . | ` +
+        `docker exec -i ${shellEscape(containerId)} tar -xf - -C /workspace`,
+    ].join("; ");
 
-    const proc = Bun.spawn(["docker", "cp", src, `${containerId}:/workspace`], {
+    const proc = Bun.spawn(["bash", "-lc", cmd], {
       stdout: "pipe",
       stderr: "pipe",
     });
 
-    const stderrText = await new Response(proc.stderr).text();
-    const exitCode = await proc.exited;
+    const timeout = new Promise<number>((resolve) => {
+      setTimeout(() => resolve(-1), WORKSPACE_COPY_TIMEOUT_MS);
+    });
+
+    const stderrPromise = new Response(proc.stderr).text();
+    const exitCode = await Promise.race([proc.exited, timeout]);
+
+    if (exitCode === -1) {
+      try { proc.kill(); } catch { /* best-effort */ }
+      throw new Error(`workspace copy timed out after ${Math.floor(WORKSPACE_COPY_TIMEOUT_MS / 1000)}s`);
+    }
 
     if (exitCode !== 0) {
+      const stderrText = await stderrPromise;
       throw new Error(
-        `docker cp failed (exit ${exitCode}): ${stderrText.trim() || "unknown error"}`,
+        `workspace copy failed (exit ${exitCode}): ${stderrText.trim() || "unknown error"}`,
       );
     }
   }
@@ -398,15 +440,85 @@ export class ContainerManager {
     this.seedGitAuth(containerId);
   }
 
+  /**
+   * Run git fetch/checkout/pull inside a running container at /workspace.
+   * Call after copyWorkspaceToContainer + reseedGitAuth so credentials are available.
+   * Fetch and pull failures are non-fatal (warnings), matching host-side behavior.
+   */
+  gitOpsInContainer(
+    containerId: string,
+    opts: {
+      branch: string;
+      currentBranch: string;
+      createBranch?: boolean;
+      defaultBranch?: string;
+    },
+  ): { fetchOk: boolean; checkoutOk: boolean; pullOk: boolean; errors: string[] } {
+    const errors: string[] = [];
+    const branch = shellEscape(opts.branch);
+
+    // 1. git fetch --prune
+    let fetchOk = false;
+    try {
+      this.execInContainer(containerId, [
+        "sh", "-lc", "cd /workspace && git fetch --prune",
+      ]);
+      fetchOk = true;
+    } catch (e) {
+      errors.push(`fetch: ${e instanceof Error ? e.message : String(e)}`);
+    }
+
+    // 2. git checkout (only if different branch requested)
+    let checkoutOk = true;
+    if (opts.currentBranch !== opts.branch) {
+      checkoutOk = false;
+      try {
+        this.execInContainer(containerId, [
+          "sh", "-lc", `cd /workspace && git checkout ${branch}`,
+        ]);
+        checkoutOk = true;
+      } catch {
+        if (opts.createBranch) {
+          const base = shellEscape(opts.defaultBranch || "main");
+          try {
+            this.execInContainer(containerId, [
+              "sh", "-lc",
+              `cd /workspace && git checkout -b ${branch} origin/${base} 2>/dev/null || git checkout -b ${branch} ${base}`,
+            ]);
+            checkoutOk = true;
+          } catch (e2) {
+            errors.push(`checkout-create: ${e2 instanceof Error ? e2.message : String(e2)}`);
+          }
+        } else {
+          errors.push(`checkout: branch "${opts.branch}" does not exist`);
+        }
+      }
+    }
+
+    // 3. git pull
+    let pullOk = false;
+    try {
+      this.execInContainer(containerId, [
+        "sh", "-lc", "cd /workspace && git pull",
+      ]);
+      pullOk = true;
+    } catch (e) {
+      errors.push(`pull: ${e instanceof Error ? e.message : String(e)}`);
+    }
+
+    return { fetchOk, checkoutOk, pullOk, errors };
+  }
+
   /** Parse `docker port` output to get host port mappings. */
-  private resolvePortMappings(containerId: string, ports: number[]): PortMapping[] {
+  private resolvePortMappings(containerId: string, ports: (number | ContainerPortSpec)[]): PortMapping[] {
     const mappings: PortMapping[] = [];
-    for (const containerPort of ports) {
+    for (const portSpec of ports) {
+      const containerPort = typeof portSpec === "number" ? portSpec : portSpec.port;
       try {
         const raw = exec(
           `docker port ${shellEscape(containerId)} ${containerPort}`,
         );
-        // Output like "0.0.0.0:49152" or "[::]:49152"
+        // Output like "0.0.0.0:49152" or "127.0.0.1:49152" or "[::]:49152"
         const match = raw.match(/:(\d+)$/m);
         if (match) {
           mappings.push({
@@ -576,6 +688,14 @@ export class ContainerManager {
   /** Get container info for a session. */
   getContainer(sessionId: string): ContainerInfo | undefined {
     return this.containers.get(sessionId);
+  }
+
+  /** Get container info by Docker container ID. */
+  getContainerById(containerId: string): ContainerInfo | undefined {
+    for (const info of this.containers.values()) {
+      if (info.containerId === containerId) return info;
+    }
+    return undefined;
   }
 
   /** List all tracked containers. */

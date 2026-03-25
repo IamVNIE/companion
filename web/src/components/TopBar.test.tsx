@@ -8,15 +8,20 @@ vi.mock("../api.js", () => ({
   },
 }));
 
+vi.mock("../ws.js", () => ({
+  sendToSession: vi.fn(),
+}));
+
 interface MockStoreState {
   currentSessionId: string | null;
   cliConnected: Map<string, boolean>;
   sessionStatus: Map<string, "idle" | "running" | "compacting" | null>;
+  sessionNames: Map<string, string>;
   sidebarOpen: boolean;
   setSidebarOpen: ReturnType<typeof vi.fn>;
   taskPanelOpen: boolean;
   setTaskPanelOpen: ReturnType<typeof vi.fn>;
-  activeTab: "chat" | "diff" | "terminal";
+  activeTab: "chat" | "diff" | "terminal" | "processes" | "editor";
   setActiveTab: ReturnType<typeof vi.fn>;
   markChatTabReentry: ReturnType<typeof vi.fn>;
   quickTerminalOpen: boolean;
@@ -24,8 +29,9 @@ interface MockStoreState {
   openQuickTerminal: ReturnType<typeof vi.fn>;
   resetQuickTerminal: ReturnType<typeof vi.fn>;
   sessions: Map<string, { cwd?: string; is_containerized?: boolean }>;
-  sdkSessions: { sessionId: string; cwd?: string; containerId?: string }[];
-  changedFiles: Map<string, Set<string>>;
+  sdkSessions: { sessionId: string; cwd?: string; containerId?: string; model?: string; backendType?: string }[];
+  gitChangedFilesCount: Map<string, number>;
+  sessionProcesses: Map<string, { status: string }[]>;
 }
 
 let storeState: MockStoreState;
@@ -35,6 +41,7 @@ function resetStore(overrides: Partial<MockStoreState> = {}) {
     currentSessionId: "s1",
     cliConnected: new Map([["s1", true]]),
     sessionStatus: new Map([["s1", "idle"]]),
+    sessionNames: new Map(),
     sidebarOpen: true,
     setSidebarOpen: vi.fn(),
     taskPanelOpen: false,
@@ -48,13 +55,19 @@ function resetStore(overrides: Partial<MockStoreState> = {}) {
     resetQuickTerminal: vi.fn(),
     sessions: new Map([["s1", { cwd: "/repo" }]]),
     sdkSessions: [],
-    changedFiles: new Map(),
+    gitChangedFilesCount: new Map(),
+    sessionProcesses: new Map(),
     ...overrides,
   };
 }
 
 vi.mock("../store.js", () => ({
-  useStore: (selector: (s: MockStoreState) => unknown) => selector(storeState),
+  useStore: Object.assign(
+    (selector: (s: MockStoreState) => unknown) => selector(storeState),
+    {
+      getState: () => ({ ...storeState, setSdkSessions: vi.fn() }),
+    },
+  ),
 }));
 
 import { TopBar } from "./TopBar.js";
@@ -67,13 +80,9 @@ beforeEach(() => {
 
 describe("TopBar", () => {
   it("shows diff badge count only for files within cwd", () => {
+    // gitChangedFilesCount is set by DiffPanel after filtering to cwd scope
     resetStore({
-      changedFiles: new Map([
-        [
-          "s1",
-          new Set(["/repo/src/a.ts", "/repo/src/b.ts", "/Users/stan/.claude/plans/plan.md"]),
-        ],
-      ]),
+      gitChangedFilesCount: new Map([["s1", 2]]),
     });
 
     render(<TopBar />);
@@ -81,11 +90,20 @@ describe("TopBar", () => {
     expect(screen.queryByText("3")).not.toBeInTheDocument();
   });
 
-  it("hides diff badge when all changed files are out of scope", () => {
+  it("uses theme-safe classes for the diff badge in dark mode", () => {
     resetStore({
-      changedFiles: new Map([["s1", new Set(["/Users/stan/.claude/plans/plan.md"])]]),
+      gitChangedFilesCount: new Map([["s1", 1]]),
     });
+    render(<TopBar />);
+    const badge = screen.getByText("1");
+    // Badge uses amber Tailwind utilities, not semantic cc-warning token.
+    expect(badge.className).toContain("bg-amber-100");
+    expect(badge.className).toContain("dark:bg-amber-900/60");
+    expect(badge.className).not.toContain("bg-cc-warning");
+  });
 
+  it("hides diff badge when no changed files", () => {
+    // gitChangedFilesCount not set (or 0) → no badge
     render(<TopBar />);
     expect(screen.queryByText("1")).not.toBeInTheDocument();
   });
@@ -139,6 +157,12 @@ describe("TopBar", () => {
     expect(storeState.openQuickTerminal).not.toHaveBeenCalled();
   });
 
+  it("always shows editor tab", () => {
+    // Editor tab is always present (replaced the old Files tab)
+    render(<TopBar />);
+    expect(screen.getByRole("button", { name: "Editor tab" })).toBeInTheDocument();
+  });
+
   it("keeps terminal tab active when clicking shell while already active", () => {
     resetStore({
       activeTab: "terminal",
@@ -169,5 +193,47 @@ describe("TopBar", () => {
 
     fireEvent.keyDown(window, { key: "j", metaKey: true });
     expect(storeState.setActiveTab).toHaveBeenCalledWith("diff");
+  });
+
+  it("marks the active tab with a primary underline indicator", () => {
+    // Flat underline tabs: the active tab gets border-cc-primary, inactive tabs get border-transparent.
+    resetStore({ activeTab: "diff" });
+    render(<TopBar />);
+
+    const diffTab = screen.getByRole("button", { name: "Diffs tab" });
+    const chatTab = screen.getByRole("button", { name: "Session tab" });
+
+    expect(diffTab.className).toContain("border-cc-primary");
+    expect(diffTab.className).toContain("text-cc-fg");
+    expect(chatTab.className).toContain("border-transparent");
+    expect(chatTab.className).toContain("text-cc-muted");
+  });
+
+  it("tab buttons have accessible names", () => {
+    // Verifies all workspace tabs are identifiable by assistive technology.
+    render(<TopBar />);
+    expect(screen.getByRole("button", { name: "Session tab" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Diffs tab" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Shell tab" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Processes tab" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Editor tab" })).toBeInTheDocument();
+  });
+
+  it("cycles from processes to editor on Cmd+J", () => {
+    // Tabs: chat, diff, terminal, processes, editor
+    // Starting from processes, Cmd+J should cycle to editor
+    resetStore({ activeTab: "processes" });
+    render(<TopBar />);
+
+    fireEvent.keyDown(window, { key: "j", metaKey: true });
+    expect(storeState.setActiveTab).toHaveBeenCalledWith("editor");
+  });
+
+  it("passes axe accessibility checks", async () => {
+    const { axe } = await import("vitest-axe");
+    resetStore();
+    const { container } = render(<TopBar />);
+    const results = await axe(container);
+    expect(results).toHaveNoViolations();
   });
 });

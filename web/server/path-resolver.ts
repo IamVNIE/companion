@@ -118,7 +118,18 @@ export function buildFallbackPath(): string {
     }
   }
 
-  return [...new Set(candidates.filter((dir) => existsSync(dir)))].join(pathDelimiter);
+  // fnm (Fast Node Manager) — versions stored in fnm multishell or XDG data
+  const fnmDir = join(home, "Library", "Application Support", "fnm", "node-versions");
+  if (existsSync(fnmDir)) {
+    try {
+      for (const v of readdirSync(fnmDir)) {
+        candidates.push(join(fnmDir, v, "installation", "bin"));
+      }
+    } catch { /* ignore */ }
+  }
+
+  const pathSep = process.platform === "win32" ? ";" : ":";
+  return [...new Set(candidates.filter((dir) => existsSync(dir)))].join(pathSep);
 }
 
 // ─── Enriched PATH (cached) ───────────────────────────────────────────────────
@@ -135,9 +146,10 @@ export function getEnrichedPath(): string {
 
   const currentPath = process.env.PATH || "";
   const userPath = captureUserShellPath();
+  const pathSep = process.platform === "win32" ? ";" : ":";
 
   // Merge: user shell PATH first (takes precedence), then current process PATH
-  const allDirs = [...userPath.split(pathDelimiter), ...currentPath.split(pathDelimiter)];
+  const allDirs = [...userPath.split(pathSep), ...currentPath.split(pathSep)];
   const seen = new Set<string>();
   const deduped: string[] = [];
   for (const dir of allDirs) {
@@ -147,7 +159,7 @@ export function getEnrichedPath(): string {
     }
   }
 
-  _cachedPath = deduped.join(pathDelimiter);
+  _cachedPath = deduped.join(pathSep);
   return _cachedPath;
 }
 
@@ -166,22 +178,35 @@ export function resolveBinary(name: string): string | null {
   if (isAbsolute(name)) {
     return existsSync(name) ? name : null;
   }
-
-  const enrichedPath = getEnrichedPath();
-  try {
-    const cmd = whichCommand();
-    const sanitized = name.replace(/[^a-zA-Z0-9._@/\\-]/g, "");
-    const resolved = execSync(`${cmd} ${sanitized}`, {
-      encoding: "utf-8",
-      timeout: 5_000,
-      env: { ...process.env, PATH: enrichedPath },
-    }).trim();
-    // `where` on Windows may return multiple lines — take the first
-    const firstLine = resolved.split(/\r?\n/)[0]?.trim();
-    return firstLine || null;
-  } catch {
-    return null;
+  // On Windows, also accept absolute paths like C:\... or D:\...
+  if (process.platform === "win32" && /^[a-zA-Z]:[/\\]/.test(name)) {
+    return existsSync(name) ? name : null;
   }
+
+  const sanitized = name.replace(/[^a-zA-Z0-9._@/-]/g, "");
+  const enrichedPath = getEnrichedPath();
+
+  // Try `where` first on Windows (returns native Win32 paths), then `which` as fallback
+  const commands = process.platform === "win32" ? ["where", "which"] : ["which"];
+  for (const cmd of commands) {
+    try {
+      const result = execSync(`${cmd} ${sanitized}`, {
+        encoding: "utf-8",
+        timeout: 5_000,
+        env: { ...process.env, PATH: enrichedPath },
+      }).trim();
+      if (!result) continue;
+      // `where` on Windows may return multiple lines; prefer .cmd for Bun.spawn compatibility
+      if (cmd === "where") {
+        const lines = result.split(/\r?\n/).filter(Boolean);
+        return lines.find(l => l.endsWith(".cmd")) || lines[0];
+      }
+      return result;
+    } catch {
+      continue;
+    }
+  }
+  return null;
 }
 
 /**

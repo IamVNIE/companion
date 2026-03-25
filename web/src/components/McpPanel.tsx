@@ -89,7 +89,7 @@ function McpServerRow({
 
       {/* Expanded details */}
       {expanded && (
-        <div className="px-2.5 pb-2.5 space-y-1.5 border-t border-cc-border pt-2">
+        <div className="px-2.5 pb-2.5 space-y-1.5 pt-2">
           {/* Config info */}
           <div className="text-[11px] text-cc-muted space-y-0.5">
             <div className="flex items-center gap-1">
@@ -203,7 +203,7 @@ function AddServerForm({
           value={name}
           onChange={(e) => setName(e.target.value)}
           placeholder="my-mcp-server"
-          className="w-full text-[12px] bg-cc-bg-secondary border border-cc-border rounded px-2 py-1.5 text-cc-fg placeholder:text-cc-muted/40 focus:outline-none focus:border-cc-accent"
+          className="w-full text-[12px] bg-cc-input-bg border border-cc-border rounded px-2 py-1.5 text-cc-fg placeholder:text-cc-muted/40 focus:outline-none focus:border-cc-primary"
         />
       </div>
 
@@ -220,7 +220,7 @@ function AddServerForm({
               onClick={() => setServerType(t)}
               className={`text-[11px] px-2 py-1 rounded-md border transition-colors cursor-pointer ${
                 serverType === t
-                  ? "border-cc-accent text-cc-accent bg-cc-accent/10"
+                  ? "border-cc-primary text-cc-primary bg-cc-primary/10"
                   : "border-cc-border text-cc-muted hover:text-cc-fg hover:border-cc-muted"
               }`}
             >
@@ -242,7 +242,7 @@ function AddServerForm({
               value={command}
               onChange={(e) => setCommand(e.target.value)}
               placeholder="npx -y @modelcontextprotocol/server-memory"
-              className="w-full text-[12px] bg-cc-bg-secondary border border-cc-border rounded px-2 py-1.5 text-cc-fg placeholder:text-cc-muted/40 font-mono focus:outline-none focus:border-cc-accent"
+              className="w-full text-[12px] bg-cc-input-bg border border-cc-border rounded px-2 py-1.5 text-cc-fg placeholder:text-cc-muted/40 font-mono focus:outline-none focus:border-cc-primary"
             />
           </div>
           <div>
@@ -254,7 +254,7 @@ function AddServerForm({
               value={args}
               onChange={(e) => setArgs(e.target.value)}
               placeholder="--port 3000"
-              className="w-full text-[12px] bg-cc-bg-secondary border border-cc-border rounded px-2 py-1.5 text-cc-fg placeholder:text-cc-muted/40 font-mono focus:outline-none focus:border-cc-accent"
+              className="w-full text-[12px] bg-cc-input-bg border border-cc-border rounded px-2 py-1.5 text-cc-fg placeholder:text-cc-muted/40 font-mono focus:outline-none focus:border-cc-primary"
             />
           </div>
         </>
@@ -271,7 +271,7 @@ function AddServerForm({
             value={url}
             onChange={(e) => setUrl(e.target.value)}
             placeholder="http://localhost:3000/mcp"
-            className="w-full text-[12px] bg-cc-bg-secondary border border-cc-border rounded px-2 py-1.5 text-cc-fg placeholder:text-cc-muted/40 font-mono focus:outline-none focus:border-cc-accent"
+            className="w-full text-[12px] bg-cc-input-bg border border-cc-border rounded px-2 py-1.5 text-cc-fg placeholder:text-cc-muted/40 font-mono focus:outline-none focus:border-cc-primary"
           />
         </div>
       )}
@@ -283,7 +283,7 @@ function AddServerForm({
           disabled={!canSubmit}
           className={`flex-1 text-[11px] font-medium py-1.5 rounded-md transition-colors ${
             canSubmit
-              ? "bg-cc-accent text-white hover:bg-cc-accent/90 cursor-pointer"
+              ? "bg-cc-primary text-white hover:bg-cc-primary-hover cursor-pointer"
               : "bg-cc-hover text-cc-muted cursor-not-allowed"
           }`}
         >
@@ -312,11 +312,9 @@ export function McpSection({ sessionId }: { sessionId: string }) {
     (s) => s.sessions.get(sessionId)?.mcp_servers ?? EMPTY_MCP_INIT,
   );
 
-  const hasMcp = servers.length > 0 || sessionMcpServers.length > 0;
-
   // Auto-fetch detailed status when connected.
   // For Codex sessions, session_init may not include MCP server hints, so
-  // we must fetch regardless of current hasMcp detection.
+  // we must fetch even when no MCP server hints are currently present.
   useEffect(() => {
     if (cliConnected) {
       sendMcpGetStatus(sessionId);
@@ -337,8 +335,8 @@ export function McpSection({ sessionId }: { sessionId: string }) {
   return (
     <>
       {/* MCP section header */}
-      <div className="shrink-0 px-4 py-2.5 border-b border-cc-border flex items-center justify-between">
-        <span className="text-[12px] font-semibold text-cc-fg flex items-center gap-1.5">
+      <div className="shrink-0 px-4 py-2.5 flex items-center justify-between">
+        <span className="text-[13px] font-semibold text-cc-fg flex items-center gap-1.5">
           <svg viewBox="0 0 16 16" fill="currentColor" className="w-3.5 h-3.5 text-cc-muted">
             <path d="M1.5 3A1.5 1.5 0 013 1.5h10A1.5 1.5 0 0114.5 3v1A1.5 1.5 0 0113 5.5H3A1.5 1.5 0 011.5 4V3zm0 5A1.5 1.5 0 013 6.5h10A1.5 1.5 0 0114.5 8v1A1.5 1.5 0 0113 10.5H3A1.5 1.5 0 011.5 9V8zm0 5A1.5 1.5 0 013 11.5h10a1.5 1.5 0 011.5 1.5v1a1.5 1.5 0 01-1.5 1.5H3A1.5 1.5 0 011.5 14v-1z" />
           </svg>
@@ -381,7 +379,7 @@ export function McpSection({ sessionId }: { sessionId: string }) {
 
       {/* Add server form */}
       {showAddForm && (
-        <div className="px-3 py-2 border-b border-cc-border">
+        <div className="px-3 py-2">
           <AddServerForm
             sessionId={sessionId}
             onDone={() => setShowAddForm(false)}
@@ -391,7 +389,7 @@ export function McpSection({ sessionId }: { sessionId: string }) {
 
       {/* Server list */}
       {displayServers.length > 0 && (
-        <div className="px-3 py-2 space-y-1.5 border-b border-cc-border">
+        <div className="px-3 py-2 space-y-1.5">
           {displayServers.map((server) => (
             <McpServerRow
               key={server.name}
@@ -404,13 +402,13 @@ export function McpSection({ sessionId }: { sessionId: string }) {
 
       {/* Empty state */}
       {!showAddForm && displayServers.length === 0 && (
-        <div className="px-3 py-3 border-b border-cc-border">
+        <div className="px-3 py-3">
           <p className="text-[11px] text-cc-muted text-center">
             No MCP servers configured.{" "}
             {cliConnected && (
               <button
                 onClick={() => setShowAddForm(true)}
-                className="text-cc-accent hover:underline cursor-pointer"
+                className="text-cc-primary hover:underline cursor-pointer"
               >
                 Add one
               </button>

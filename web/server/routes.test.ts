@@ -1,17 +1,42 @@
 import { vi, describe, it, expect, beforeEach } from "vitest";
 
+// Mock auth-manager so all test requests pass the auth middleware
+vi.mock("./auth-manager.js", () => ({
+  verifyToken: vi.fn(() => true),
+  getToken: vi.fn(() => "test-token-for-routes"),
+  getLanAddress: vi.fn(() => "192.168.1.100"),
+  _resetForTest: vi.fn(),
+}));
+
 // Mock env-manager and git-utils modules before any imports
 vi.mock("./env-manager.js", () => ({
   listEnvs: vi.fn(() => []),
   getEnv: vi.fn(() => null),
-  getEffectiveImage: vi.fn(() => null),
   createEnv: vi.fn(),
   updateEnv: vi.fn(),
   deleteEnv: vi.fn(),
 }));
 
+// Mock sandbox-manager — sandboxes now own Docker/container config (separated from envs)
+vi.mock("./sandbox-manager.js", () => ({
+  listSandboxes: vi.fn(() => []),
+  getSandbox: vi.fn(() => null),
+  createSandbox: vi.fn(),
+  updateSandbox: vi.fn(),
+  deleteSandbox: vi.fn(() => false),
+}));
+
+vi.mock("./prompt-manager.js", () => ({
+  listPrompts: vi.fn(() => []),
+  getPrompt: vi.fn(() => null),
+  createPrompt: vi.fn(),
+  updatePrompt: vi.fn(),
+  deletePrompt: vi.fn(() => false),
+}));
+
 vi.mock("node:child_process", () => ({
   execSync: vi.fn(() => ""),
+  execFileSync: vi.fn(() => ""),
 }));
 
 const mockResolveBinary = vi.hoisted(() => vi.fn((_name: string) => null as string | null));
@@ -36,6 +61,7 @@ vi.mock("./git-utils.js", () => ({
   gitFetch: vi.fn(() => ({ success: true, output: "" })),
   gitPull: vi.fn(() => ({ success: true, output: "" })),
   checkoutBranch: vi.fn(),
+  checkoutOrCreateBranch: vi.fn(() => ({ created: false })),
   removeWorktree: vi.fn(),
   isWorktreeDirty: vi.fn(() => false),
 }));
@@ -49,17 +75,137 @@ vi.mock("./session-names.js", () => ({
 }));
 
 vi.mock("./settings-manager.js", () => ({
-  DEFAULT_OPENROUTER_MODEL: "openrouter/free",
+  DEFAULT_ANTHROPIC_MODEL: "claude-sonnet-4-6",
   getSettings: vi.fn(() => ({
-    openrouterApiKey: "",
-    openrouterModel: "openrouter/free",
+    anthropicApiKey: "",
+    anthropicModel: "claude-sonnet-4-6",
+    linearApiKey: "",
+    linearAutoTransition: false,
+    linearAutoTransitionStateId: "",
+    linearAutoTransitionStateName: "",
+    linearArchiveTransition: false,
+    linearArchiveTransitionStateId: "",
+    linearArchiveTransitionStateName: "",
+    linearOAuthClientId: "",
+    linearOAuthClientSecret: "",
+    linearOAuthWebhookSecret: "",
+    linearOAuthAccessToken: "",
+    linearOAuthRefreshToken: "",
+    editorTabEnabled: false,
+    aiValidationEnabled: false,
+    aiValidationAutoApprove: true,
+    aiValidationAutoDeny: false,
+    publicUrl: "",
+    updateChannel: "stable",
+    dockerAutoUpdate: false,
     updatedAt: 0,
   })),
   updateSettings: vi.fn((patch) => ({
-    openrouterApiKey: patch.openrouterApiKey ?? "",
-    openrouterModel: patch.openrouterModel ?? "openrouter/free",
+    anthropicApiKey: patch.anthropicApiKey ?? "",
+    anthropicModel: patch.anthropicModel ?? "claude-sonnet-4-6",
+    linearApiKey: patch.linearApiKey ?? "",
+    linearAutoTransition: patch.linearAutoTransition ?? false,
+    linearAutoTransitionStateId: patch.linearAutoTransitionStateId ?? "",
+    linearAutoTransitionStateName: patch.linearAutoTransitionStateName ?? "",
+    linearArchiveTransition: patch.linearArchiveTransition ?? false,
+    linearArchiveTransitionStateId: patch.linearArchiveTransitionStateId ?? "",
+    linearArchiveTransitionStateName: patch.linearArchiveTransitionStateName ?? "",
+    linearOAuthClientId: patch.linearOAuthClientId ?? "",
+    linearOAuthClientSecret: patch.linearOAuthClientSecret ?? "",
+    linearOAuthWebhookSecret: patch.linearOAuthWebhookSecret ?? "",
+    linearOAuthAccessToken: patch.linearOAuthAccessToken ?? "",
+    linearOAuthRefreshToken: patch.linearOAuthRefreshToken ?? "",
+    editorTabEnabled: patch.editorTabEnabled ?? false,
+    aiValidationEnabled: patch.aiValidationEnabled ?? false,
+    aiValidationAutoApprove: patch.aiValidationAutoApprove ?? true,
+    aiValidationAutoDeny: patch.aiValidationAutoDeny ?? false,
+    publicUrl: patch.publicUrl ?? "",
+    updateChannel: patch.updateChannel ?? "stable",
+    dockerAutoUpdate: patch.dockerAutoUpdate ?? false,
     updatedAt: Date.now(),
   })),
+}));
+
+const mockGetLinearIssue = vi.hoisted(() => vi.fn(() => undefined as any));
+vi.mock("./session-linear-issues.js", () => ({
+  getLinearIssue: mockGetLinearIssue,
+  setLinearIssue: vi.fn(),
+  removeLinearIssue: vi.fn(),
+  getAllLinearIssues: vi.fn(() => ({})),
+  _resetForTest: vi.fn(),
+}));
+
+const mockTransitionLinearIssue = vi.hoisted(() => vi.fn(async () => ({ ok: true, issue: { id: "i1", identifier: "ENG-1", stateName: "Backlog", stateType: "backlog" } } as { ok: boolean; error?: string; issue?: { id: string; identifier: string; stateName: string; stateType: string } })));
+const mockFetchLinearTeamStates = vi.hoisted(() => vi.fn(async () => [
+  { id: "team-1", key: "ENG", name: "Engineering", states: [
+    { id: "state-backlog", name: "Backlog", type: "backlog" },
+    { id: "state-inprogress", name: "In Progress", type: "started" },
+    { id: "state-done", name: "Done", type: "completed" },
+  ] },
+]));
+vi.mock("./routes/linear-routes.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("./routes/linear-routes.js")>();
+  return {
+    ...actual,
+    transitionLinearIssue: mockTransitionLinearIssue,
+    fetchLinearTeamStates: mockFetchLinearTeamStates,
+  };
+});
+
+vi.mock("./linear-project-manager.js", () => ({
+  listMappings: vi.fn(() => []),
+  getMapping: vi.fn(() => null),
+  upsertMapping: vi.fn((repoRoot: string, data: { projectId: string; projectName: string }) => ({
+    repoRoot,
+    ...data,
+    createdAt: Date.now(),
+    updatedAt: Date.now(),
+  })),
+  removeMapping: vi.fn(() => false),
+  _resetForTest: vi.fn(),
+}));
+
+// Mock linear-connections to isolate from the file-based connection store.
+// resolveApiKey returns a valid key by default; tests that need "no key"
+// override it to return null.
+vi.mock("./linear-connections.js", () => ({
+  listConnections: vi.fn(() => []),
+  getConnection: vi.fn(() => null),
+  getDefaultConnection: vi.fn(() => null),
+  createConnection: vi.fn(),
+  updateConnection: vi.fn(),
+  deleteConnection: vi.fn(),
+  resolveApiKey: vi.fn(() => ({ apiKey: "lin_api_123", connectionId: "test-conn" })),
+  _resetForTest: vi.fn(),
+}));
+
+const mockDiscoverClaudeSessions = vi.hoisted(() => vi.fn(
+  (_options?: { limit?: number }) =>
+    [] as Array<{
+      sessionId: string;
+      cwd: string;
+      gitBranch?: string;
+      slug?: string;
+      lastActivityAt: number;
+      sourceFile: string;
+    }>
+));
+vi.mock("./claude-session-discovery.js", () => ({
+  discoverClaudeSessions: mockDiscoverClaudeSessions,
+}));
+
+const mockGetClaudeSessionHistoryPage = vi.hoisted(() => vi.fn(
+  (_options?: { sessionId: string; limit?: number; cursor?: number }) =>
+    null as {
+      sourceFile: string;
+      nextCursor: number;
+      hasMore: boolean;
+      totalMessages: number;
+      messages: Array<{ id: string; role: "user" | "assistant"; content: string; timestamp: number }>;
+    } | null
+));
+vi.mock("./claude-session-history.js", () => ({
+  getClaudeSessionHistoryPage: mockGetClaudeSessionHistoryPage,
 }));
 
 const mockGetUsageLimits = vi.hoisted(() => vi.fn());
@@ -86,14 +232,51 @@ vi.mock("./update-checker.js", () => ({
   setUpdateInProgress: mockSetUpdateInProgress,
 }));
 
+// Mock image-pull-manager — default: images are always ready
+const mockImagePullIsReady = vi.hoisted(() => vi.fn(() => true));
+interface MockImagePullState {
+  image: string;
+  status: "idle" | "pulling" | "ready" | "error";
+  progress: string[];
+  error?: string;
+  startedAt?: number;
+  completedAt?: number;
+}
+const mockImagePullGetState = vi.hoisted(() => vi.fn(
+  (image: string): MockImagePullState => ({
+    image,
+    status: "ready",
+    progress: [],
+  })
+));
+const mockImagePullEnsureImage = vi.hoisted(() => vi.fn());
+const mockImagePullWaitForReady = vi.hoisted(() => vi.fn(async () => true));
+const mockImagePullPull = vi.hoisted(() => vi.fn());
+const mockImagePullOnProgress = vi.hoisted(() => vi.fn(() => () => {}));
+
+vi.mock("./image-pull-manager.js", () => ({
+  imagePullManager: {
+    isReady: mockImagePullIsReady,
+    getState: mockImagePullGetState,
+    ensureImage: mockImagePullEnsureImage,
+    waitForReady: mockImagePullWaitForReady,
+    pull: mockImagePullPull,
+    onProgress: mockImagePullOnProgress,
+  },
+}));
+
 import { Hono } from "hono";
 import { execSync } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
 import { createRoutes } from "./routes.js";
 import * as envManager from "./env-manager.js";
+import * as sandboxManager from "./sandbox-manager.js";
+import * as promptManager from "./prompt-manager.js";
 import * as gitUtils from "./git-utils.js";
 import * as sessionNames from "./session-names.js";
 import * as settingsManager from "./settings-manager.js";
+import * as linearProjectManager from "./linear-project-manager.js";
+import { resolveApiKey } from "./linear-connections.js";
 import { containerManager } from "./container-manager.js";
 
 // ─── Mock factories ──────────────────────────────────────────────────────────
@@ -122,6 +305,9 @@ function createMockBridge() {
     getAllSessions: vi.fn(() => []),
     getCodexRateLimits: vi.fn(() => null),
     markContainerized: vi.fn(),
+    prePopulateCommands: vi.fn(),
+    broadcastNameUpdate: vi.fn(),
+    injectSystemPrompt: vi.fn(),
   } as any;
 }
 
@@ -140,9 +326,30 @@ function createMockTracker() {
   } as any;
 }
 
+function createMockOrchestrator() {
+  return {
+    createSession: vi.fn(async () => ({
+      ok: true,
+      session: { sessionId: "session-1", state: "starting", cwd: "/test", createdAt: Date.now() },
+    })),
+    createSessionStreaming: vi.fn(async () => ({
+      ok: true,
+      session: { sessionId: "session-1", state: "starting", cwd: "/test", createdAt: Date.now() },
+    })),
+    killSession: vi.fn(async () => ({ ok: true })),
+    relaunchSession: vi.fn(async () => ({ ok: true })),
+    deleteSession: vi.fn(async () => ({ ok: true })),
+    archiveSession: vi.fn(async () => ({ ok: true })),
+    unarchiveSession: vi.fn(() => ({ ok: true })),
+    clearAutoRelaunchCount: vi.fn(),
+    getSession: vi.fn(),
+  } as any;
+}
+
 // ─── Test setup ──────────────────────────────────────────────────────────────
 
 let app: Hono;
+let orchestrator: ReturnType<typeof createMockOrchestrator>;
 let launcher: ReturnType<typeof createMockLauncher>;
 let bridge: ReturnType<typeof createMockBridge>;
 let sessionStore: ReturnType<typeof createMockStore>;
@@ -151,23 +358,37 @@ let terminalManager: { getInfo: ReturnType<typeof vi.fn>; spawn: ReturnType<type
 
 beforeEach(() => {
   vi.clearAllMocks();
+  // Re-establish default return value for resolveApiKey after clearAllMocks
+  vi.mocked(resolveApiKey).mockReturnValue({ apiKey: "lin_api_123", connectionId: "test-conn" });
+  mockDiscoverClaudeSessions.mockReturnValue([]);
+  mockGetClaudeSessionHistoryPage.mockReturnValue(null);
   mockUpdateCheckerState.currentVersion = "0.22.1";
   mockUpdateCheckerState.latestVersion = null;
   mockUpdateCheckerState.lastChecked = 0;
   mockUpdateCheckerState.isServiceMode = false;
   mockUpdateCheckerState.checking = false;
   mockUpdateCheckerState.updateInProgress = false;
+  orchestrator = createMockOrchestrator();
   launcher = createMockLauncher();
   bridge = createMockBridge();
   sessionStore = createMockStore();
   tracker = createMockTracker();
   terminalManager = { getInfo: vi.fn(() => null), spawn: vi.fn(() => ""), kill: vi.fn() };
   app = new Hono();
-  app.route("/api", createRoutes(launcher, bridge, sessionStore, tracker, terminalManager as any));
+  app.route("/api", createRoutes(orchestrator, launcher, bridge, terminalManager as any));
 
   // Default no-op mocks for container workspace isolation (called during container session creation)
   vi.spyOn(containerManager, "copyWorkspaceToContainer").mockResolvedValue(undefined);
   vi.spyOn(containerManager, "reseedGitAuth").mockImplementation(() => {});
+
+  // Default: images are always ready via pull manager
+  mockImagePullIsReady.mockReturnValue(true);
+  mockImagePullGetState.mockImplementation((image: string) => ({
+    image,
+    status: "ready" as const,
+    progress: [],
+  }));
+  mockImagePullWaitForReady.mockResolvedValue(true);
 });
 
 describe("POST /api/terminal/kill", () => {
@@ -197,148 +418,75 @@ describe("POST /api/terminal/kill", () => {
 // ─── Sessions ────────────────────────────────────────────────────────────────
 
 describe("POST /api/sessions/create", () => {
-  it("launches a session and returns its info", async () => {
+  // Route delegates to orchestrator.createSession — detailed orchestration logic
+  // (env resolution, git ops, container creation, etc.) is tested in session-orchestrator.test.ts.
+  // Route tests verify correct delegation and HTTP response mapping.
+
+  it("delegates to orchestrator and returns session info on success", async () => {
+    orchestrator.createSession.mockResolvedValue({
+      ok: true,
+      session: { sessionId: "session-1", state: "starting", cwd: "/test", createdAt: Date.now() },
+    });
+
     const res = await app.request("/api/sessions/create", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ model: "claude-sonnet-4-5-20250929", cwd: "/test" }),
+      body: JSON.stringify({ model: "claude-sonnet-4-6", cwd: "/test" }),
     });
 
     expect(res.status).toBe(200);
     const json = await res.json();
     expect(json).toMatchObject({ sessionId: "session-1", state: "starting", cwd: "/test" });
-    expect(launcher.launch).toHaveBeenCalledWith(
-      expect.objectContaining({ model: "claude-sonnet-4-5-20250929", cwd: "/test" }),
+    expect(orchestrator.createSession).toHaveBeenCalledWith(
+      expect.objectContaining({ model: "claude-sonnet-4-6", cwd: "/test" }),
     );
   });
 
-  it("injects environment variables when envSlug is provided", async () => {
-    vi.mocked(envManager.getEnv).mockReturnValue({
-      name: "Production",
-      slug: "production",
-      variables: { API_KEY: "secret123", DB_HOST: "db.example.com" },
-      createdAt: 1000,
-      updatedAt: 1000,
-    });
-
+  it("passes the full request body through to orchestrator", async () => {
+    const body = {
+      cwd: "/test",
+      resumeSessionAt: "  prior-session-123  ",
+      forkSession: true,
+      backend: "codex",
+      branch: "feat",
+      useWorktree: true,
+      envSlug: "production",
+      sandboxEnabled: true,
+      sandboxSlug: "my-sandbox",
+    };
     const res = await app.request("/api/sessions/create", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ cwd: "/test", envSlug: "production" }),
+      body: JSON.stringify(body),
     });
 
     expect(res.status).toBe(200);
-    expect(envManager.getEnv).toHaveBeenCalledWith("production");
-    expect(launcher.launch).toHaveBeenCalledWith(
-      expect.objectContaining({
-        env: { API_KEY: "secret123", DB_HOST: "db.example.com" },
-      }),
-    );
+    expect(orchestrator.createSession).toHaveBeenCalledWith(body);
   });
 
-  it("fetches and pulls before create when branch matches current branch", async () => {
-    vi.mocked(gitUtils.getRepoInfo).mockReturnValue({
-      repoRoot: "/repo",
-      repoName: "my-repo",
-      currentBranch: "main",
-      defaultBranch: "main",
-      isWorktree: false,
+  it("returns error status from orchestrator on failure", async () => {
+    orchestrator.createSession.mockResolvedValue({
+      ok: false,
+      error: "Invalid backend: invalid-backend",
+      status: 400,
     });
 
     const res = await app.request("/api/sessions/create", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ cwd: "/repo", branch: "main" }),
+      body: JSON.stringify({ cwd: "/test", backend: "invalid-backend" }),
     });
 
-    expect(res.status).toBe(200);
-    expect(gitUtils.gitFetch).toHaveBeenCalledWith("/repo");
-    expect(gitUtils.checkoutBranch).not.toHaveBeenCalled();
-    expect(gitUtils.gitPull).toHaveBeenCalledWith("/repo");
-  });
-
-  it("fetches, checks out selected branch, then pulls before create", async () => {
-    vi.mocked(gitUtils.getRepoInfo).mockReturnValue({
-      repoRoot: "/repo",
-      repoName: "my-repo",
-      currentBranch: "develop",
-      defaultBranch: "main",
-      isWorktree: false,
-    });
-
-    const res = await app.request("/api/sessions/create", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ cwd: "/repo", branch: "main" }),
-    });
-
-    expect(res.status).toBe(200);
-    expect(gitUtils.gitFetch).toHaveBeenCalledWith("/repo");
-    expect(gitUtils.checkoutBranch).toHaveBeenCalledWith("/repo", "main");
-    expect(gitUtils.gitPull).toHaveBeenCalledWith("/repo");
-    expect(vi.mocked(gitUtils.gitFetch).mock.invocationCallOrder[0]).toBeLessThan(
-      vi.mocked(gitUtils.checkoutBranch).mock.invocationCallOrder[0],
-    );
-    expect(vi.mocked(gitUtils.checkoutBranch).mock.invocationCallOrder[0]).toBeLessThan(
-      vi.mocked(gitUtils.gitPull).mock.invocationCallOrder[0],
-    );
-  });
-
-  it("returns 500 and does not launch when fetch fails before create", async () => {
-    vi.mocked(gitUtils.getRepoInfo).mockReturnValue({
-      repoRoot: "/repo",
-      repoName: "my-repo",
-      currentBranch: "main",
-      defaultBranch: "main",
-      isWorktree: false,
-    });
-    vi.mocked(gitUtils.gitFetch).mockReturnValueOnce({
-      success: false,
-      output: "network error",
-    });
-
-    const res = await app.request("/api/sessions/create", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ cwd: "/repo", branch: "main" }),
-    });
-
-    expect(res.status).toBe(500);
+    expect(res.status).toBe(400);
     const json = await res.json();
-    expect(json).toEqual({
-      error: "git fetch failed before session create: network error",
-    });
-    expect(gitUtils.gitPull).not.toHaveBeenCalled();
-    expect(launcher.launch).not.toHaveBeenCalled();
+    expect(json.error).toContain("Invalid backend");
   });
 
-  it("proceeds with session creation when pull fails (non-fatal)", async () => {
-    vi.mocked(gitUtils.getRepoInfo).mockReturnValue({
-      repoRoot: "/repo",
-      repoName: "my-repo",
-      currentBranch: "main",
-      defaultBranch: "main",
-      isWorktree: false,
-    });
-    vi.mocked(gitUtils.gitPull).mockReturnValueOnce({
-      success: false,
-      output: "no tracking information",
-    });
-
-    const res = await app.request("/api/sessions/create", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ cwd: "/repo", branch: "main" }),
-    });
-
-    // Pull failure is non-fatal — session should still be created
-    expect(res.status).toBe(200);
-    expect(launcher.launch).toHaveBeenCalled();
-  });
-
-  it("returns 500 when launch throws an error", async () => {
-    launcher.launch.mockImplementation(() => {
-      throw new Error("CLI binary not found");
+  it("returns 500 status from orchestrator on internal errors", async () => {
+    orchestrator.createSession.mockResolvedValue({
+      ok: false,
+      error: "CLI binary not found",
+      status: 500,
     });
 
     const res = await app.request("/api/sessions/create", {
@@ -349,274 +497,37 @@ describe("POST /api/sessions/create", () => {
 
     expect(res.status).toBe(500);
     const json = await res.json();
-    expect(json).toEqual({ error: "CLI binary not found" });
+    expect(json.error).toContain("CLI binary not found");
   });
 
-  it("returns 400 for invalid backend values", async () => {
-    const res = await app.request("/api/sessions/create", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ cwd: "/test", backend: "invalid-backend" }),
-    });
-
-    expect(res.status).toBe(400);
-    const json = await res.json();
-    expect(json.error).toContain("Invalid backend");
-    expect(launcher.launch).not.toHaveBeenCalled();
-  });
-
-  it("sets up a worktree when useWorktree and branch are specified", async () => {
-    vi.mocked(gitUtils.getRepoInfo).mockReturnValue({
-      repoRoot: "/repo",
-      repoName: "my-repo",
-      currentBranch: "main",
-      defaultBranch: "main",
-      isWorktree: false,
-    });
-    vi.mocked(gitUtils.ensureWorktree).mockReturnValue({
-      worktreePath: "/home/.companion/worktrees/my-repo/feat-branch",
-      branch: "feat-branch",
-      actualBranch: "feat-branch",
-      isNew: true,
+  it("returns 503 from orchestrator on container startup failure", async () => {
+    orchestrator.createSession.mockResolvedValue({
+      ok: false,
+      error: "Docker is required but container startup failed",
+      status: 503,
     });
 
     const res = await app.request("/api/sessions/create", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ cwd: "/repo", branch: "feat-branch", useWorktree: true }),
-    });
-
-    expect(res.status).toBe(200);
-    // ensureWorktree should be called with forceNew: true
-    expect(gitUtils.ensureWorktree).toHaveBeenCalledWith("/repo", "feat-branch", {
-      baseBranch: "main",
-      createBranch: undefined,
-      forceNew: true,
-    });
-    // launcher should receive the worktree path as cwd
-    expect(launcher.launch).toHaveBeenCalled();
-    const launchOpts = launcher.launch.mock.calls[0][0];
-    expect(launchOpts.cwd).toBe("/home/.companion/worktrees/my-repo/feat-branch");
-    // Worktree mapping should be tracked
-    expect(tracker.addMapping).toHaveBeenCalledWith(
-      expect.objectContaining({
-        sessionId: "session-1",
-        repoRoot: "/repo",
-        branch: "feat-branch",
-        actualBranch: "feat-branch",
-        worktreePath: "/home/.companion/worktrees/my-repo/feat-branch",
-      }),
-    );
-  });
-
-  it("returns 503 when env has Docker image but container startup fails", async () => {
-    vi.mocked(envManager.getEnv).mockReturnValue({
-      name: "Companion",
-      slug: "companion",
-      variables: { CLAUDE_CODE_OAUTH_TOKEN: "token" },
-      baseImage: "the-companion:latest",
-      createdAt: 1000,
-      updatedAt: 1000,
-    } as any);
-    vi.mocked(envManager.getEffectiveImage).mockReturnValue("the-companion:latest");
-    vi.spyOn(containerManager, "imageExists").mockReturnValueOnce(true);
-    vi.spyOn(containerManager, "createContainer").mockImplementationOnce(() => {
-      throw new Error("docker daemon timeout");
-    });
-
-    const res = await app.request("/api/sessions/create", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ cwd: "/test", envSlug: "companion" }),
+      body: JSON.stringify({ cwd: "/test", sandboxEnabled: true }),
     });
 
     expect(res.status).toBe(503);
     const json = await res.json();
     expect(json.error).toContain("Docker is required");
-    expect(json.error).toContain("container startup failed");
-    expect(launcher.launch).not.toHaveBeenCalled();
   });
 
-  it("returns 400 when containerized Codex session lacks auth", async () => {
-    // Codex in containers needs OPENAI_API_KEY or ~/.codex/auth.json.
-    // Auth check runs before image resolution so no need to mock imageExists.
-    vi.mocked(envManager.getEnv).mockReturnValue({
-      name: "Codex Docker",
-      slug: "codex-docker",
-      variables: {},
-      baseImage: "the-companion:latest",
-      createdAt: 1000,
-      updatedAt: 1000,
-    } as any);
-    vi.mocked(envManager.getEffectiveImage).mockReturnValue("the-companion:latest");
-
+  it("handles empty request body gracefully", async () => {
     const res = await app.request("/api/sessions/create", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ cwd: "/test", envSlug: "codex-docker", backend: "codex" }),
+      body: "not-json",
     });
 
-    expect(res.status).toBe(400);
-    const json = await res.json();
-    expect(json.error).toContain("Containerized Codex requires auth");
-    expect(json.error).toContain("OPENAI_API_KEY");
-    expect(launcher.launch).not.toHaveBeenCalled();
-  });
-
-  it("allows containerized Codex when OPENAI_API_KEY is provided", async () => {
-    vi.mocked(envManager.getEnv).mockReturnValue({
-      name: "Codex Docker",
-      slug: "codex-docker",
-      variables: { OPENAI_API_KEY: "sk-test" },
-      baseImage: "the-companion:latest",
-      createdAt: 1000,
-      updatedAt: 1000,
-    } as any);
-    vi.mocked(envManager.getEffectiveImage).mockReturnValue("the-companion:latest");
-    vi.spyOn(containerManager, "imageExists").mockReturnValueOnce(true);
-    vi.spyOn(containerManager, "createContainer").mockReturnValueOnce({
-      containerId: "cid-codex",
-      name: "companion-codex",
-      image: "the-companion:latest",
-      portMappings: [],
-      hostCwd: "/test",
-      containerCwd: "/workspace",
-      state: "running",
-    });
-    vi.spyOn(containerManager, "retrack").mockImplementation(() => {});
-
-    const res = await app.request("/api/sessions/create", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ cwd: "/test", envSlug: "codex-docker", backend: "codex" }),
-    });
-
+    // Route catches JSON parse errors and defaults to {}
     expect(res.status).toBe(200);
-    expect(launcher.launch).toHaveBeenCalledWith(
-      expect.objectContaining({ backendType: "codex", containerId: "cid-codex" }),
-    );
-  });
-
-  it("auto-builds companion base image when missing locally", async () => {
-    vi.mocked(envManager.getEnv).mockReturnValue({
-      name: "Companion",
-      slug: "companion",
-      variables: { CLAUDE_CODE_OAUTH_TOKEN: "token" },
-      baseImage: "the-companion:latest",
-      createdAt: 1000,
-      updatedAt: 1000,
-    } as any);
-    vi.mocked(envManager.getEffectiveImage).mockReturnValue("the-companion:latest");
-    vi.mocked(existsSync).mockReturnValueOnce(true);
-    vi.spyOn(containerManager, "imageExists").mockReturnValueOnce(false);
-    vi.spyOn(containerManager, "pullImage").mockResolvedValueOnce(false);
-    const buildSpy = vi.spyOn(containerManager, "buildImage").mockReturnValue("ok");
-    vi.spyOn(containerManager, "createContainer").mockReturnValueOnce({
-      containerId: "cid-1",
-      name: "companion-temp",
-      image: "the-companion:latest",
-      portMappings: [],
-      hostCwd: "/test",
-      containerCwd: "/workspace",
-      state: "running",
-    });
-    vi.spyOn(containerManager, "retrack").mockImplementation(() => {});
-
-    const res = await app.request("/api/sessions/create", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ cwd: "/test", envSlug: "companion" }),
-    });
-
-    expect(res.status).toBe(200);
-    expect(buildSpy).toHaveBeenCalledWith(
-      expect.stringContaining("Dockerfile.the-companion"),
-      "the-companion:latest",
-    );
-    expect(launcher.launch).toHaveBeenCalled();
-  });
-
-  it("runs init script before launching CLI when env has initScript", async () => {
-    // Environment with initScript and Docker image
-    vi.mocked(envManager.getEnv).mockReturnValue({
-      name: "WithInit",
-      slug: "with-init",
-      variables: { CLAUDE_CODE_OAUTH_TOKEN: "token" },
-      baseImage: "the-companion:latest",
-      initScript: "bun install && pip install -r requirements.txt",
-      createdAt: 1000,
-      updatedAt: 1000,
-    } as any);
-    vi.mocked(envManager.getEffectiveImage).mockReturnValue("the-companion:latest");
-    vi.spyOn(containerManager, "imageExists").mockReturnValueOnce(true);
-    vi.spyOn(containerManager, "createContainer").mockReturnValueOnce({
-      containerId: "cid-init",
-      name: "companion-init",
-      image: "the-companion:latest",
-      portMappings: [],
-      hostCwd: "/test",
-      containerCwd: "/workspace",
-      state: "running",
-    });
-    vi.spyOn(containerManager, "retrack").mockImplementation(() => {});
-    const execAsyncSpy = vi.spyOn(containerManager, "execInContainerAsync")
-      .mockResolvedValueOnce({ exitCode: 0, output: "installed!" });
-
-    const res = await app.request("/api/sessions/create", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ cwd: "/test", envSlug: "with-init" }),
-    });
-
-    expect(res.status).toBe(200);
-    // Init script should have been executed
-    expect(execAsyncSpy).toHaveBeenCalledWith(
-      "cid-init",
-      ["sh", "-lc", "bun install && pip install -r requirements.txt"],
-      expect.objectContaining({ timeout: expect.any(Number) }),
-    );
-    // CLI should have been launched after init script
-    expect(launcher.launch).toHaveBeenCalled();
-  });
-
-  it("returns 503 and cleans up container when init script fails", async () => {
-    vi.mocked(envManager.getEnv).mockReturnValue({
-      name: "FailInit",
-      slug: "fail-init",
-      variables: { CLAUDE_CODE_OAUTH_TOKEN: "token" },
-      baseImage: "the-companion:latest",
-      initScript: "exit 1",
-      createdAt: 1000,
-      updatedAt: 1000,
-    } as any);
-    vi.mocked(envManager.getEffectiveImage).mockReturnValue("the-companion:latest");
-    vi.spyOn(containerManager, "imageExists").mockReturnValueOnce(true);
-    vi.spyOn(containerManager, "createContainer").mockReturnValueOnce({
-      containerId: "cid-fail",
-      name: "companion-fail",
-      image: "the-companion:latest",
-      portMappings: [],
-      hostCwd: "/test",
-      containerCwd: "/workspace",
-      state: "running",
-    });
-    const removeSpy = vi.spyOn(containerManager, "removeContainer").mockImplementation(() => {});
-    vi.spyOn(containerManager, "execInContainerAsync")
-      .mockResolvedValueOnce({ exitCode: 1, output: "npm ERR! missing script" });
-
-    const res = await app.request("/api/sessions/create", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ cwd: "/test", envSlug: "fail-init" }),
-    });
-
-    expect(res.status).toBe(503);
-    const json = await res.json();
-    expect(json.error).toContain("Init script failed");
-    // Container should be cleaned up
-    expect(removeSpy).toHaveBeenCalled();
-    // CLI should NOT have been launched
-    expect(launcher.launch).not.toHaveBeenCalled();
+    expect(orchestrator.createSession).toHaveBeenCalledWith({});
   });
 });
 
@@ -686,6 +597,29 @@ describe("GET /api/sessions", () => {
       totalLinesRemoved: 0,
     });
   });
+
+  it("prefers bridge cwd over launcher cwd when available", async () => {
+    const sessions = [
+      { sessionId: "s1", state: "running", cwd: "/workspace" },
+    ];
+    launcher.listSessions.mockReturnValue(sessions);
+    vi.mocked(sessionNames.getAllNames).mockReturnValue({});
+    bridge.getAllSessions.mockReturnValue([
+      {
+        session_id: "s1",
+        cwd: "/home/ubuntu/companion",
+      },
+    ]);
+
+    const res = await app.request("/api/sessions", { method: "GET" });
+
+    expect(res.status).toBe(200);
+    const json = await res.json();
+    expect(json[0]).toMatchObject({
+      sessionId: "s1",
+      cwd: "/home/ubuntu/companion",
+    });
+  });
 });
 
 describe("GET /api/sessions/:id", () => {
@@ -711,20 +645,195 @@ describe("GET /api/sessions/:id", () => {
   });
 });
 
+describe("GET /api/claude/sessions/discover", () => {
+  it("returns discovered Claude sessions and forwards limit", async () => {
+    mockDiscoverClaudeSessions.mockReturnValue([
+      {
+        sessionId: "session-123",
+        cwd: "/repo",
+        gitBranch: "feature/branch",
+        slug: "calm-mountain",
+        lastActivityAt: 12345,
+        sourceFile: "/Users/test/.claude/projects/repo/session-123.jsonl",
+      },
+    ]);
+
+    const res = await app.request("/api/claude/sessions/discover?limit=250", { method: "GET" });
+
+    expect(res.status).toBe(200);
+    expect(mockDiscoverClaudeSessions).toHaveBeenCalledWith({ limit: 250 });
+    const json = await res.json();
+    expect(json).toEqual({
+      sessions: [
+        {
+          sessionId: "session-123",
+          cwd: "/repo",
+          gitBranch: "feature/branch",
+          slug: "calm-mountain",
+          lastActivityAt: 12345,
+          sourceFile: "/Users/test/.claude/projects/repo/session-123.jsonl",
+        },
+      ],
+    });
+  });
+});
+
+describe("GET /api/claude/sessions/:id/history", () => {
+  it("returns paged Claude transcript history and forwards cursor/limit", async () => {
+    // Validate route wiring so frontend pagination requests reach the loader with the same cursor/limit.
+    mockGetClaudeSessionHistoryPage.mockReturnValue({
+      sourceFile: "/Users/test/.claude/projects/repo/session-123.jsonl",
+      nextCursor: 80,
+      hasMore: true,
+      totalMessages: 140,
+      messages: [
+        {
+          id: "resume-session-123-user-u1",
+          role: "user",
+          content: "Prior prompt",
+          timestamp: 1,
+        },
+        {
+          id: "resume-session-123-assistant-a1",
+          role: "assistant",
+          content: "Prior answer",
+          timestamp: 2,
+        },
+      ],
+    });
+
+    const res = await app.request("/api/claude/sessions/session-123/history?limit=40&cursor=40", { method: "GET" });
+
+    expect(res.status).toBe(200);
+    expect(mockGetClaudeSessionHistoryPage).toHaveBeenCalledWith({
+      sessionId: "session-123",
+      limit: 40,
+      cursor: 40,
+    });
+    const json = await res.json();
+    expect(json).toMatchObject({
+      nextCursor: 80,
+      hasMore: true,
+      totalMessages: 140,
+    });
+    expect(json.messages).toHaveLength(2);
+  });
+
+  it("returns 404 when transcript history does not exist", async () => {
+    // Validate explicit not-found semantics so UI can render a clear empty/error state.
+    mockGetClaudeSessionHistoryPage.mockReturnValue(null);
+
+    const res = await app.request("/api/claude/sessions/missing/history", { method: "GET" });
+
+    expect(res.status).toBe(404);
+    const json = await res.json();
+    expect(json).toEqual({ error: "Claude session history not found" });
+  });
+});
+
+describe("POST /api/sessions/:id/editor/start", () => {
+  it("returns unavailable when code-server is not installed on host", async () => {
+    launcher.getSession.mockReturnValue({
+      sessionId: "s1",
+      state: "running",
+      cwd: "/repo",
+    });
+    mockResolveBinary.mockImplementation((name: string) => (name === "code-server" ? null : null));
+
+    const res = await app.request("/api/sessions/s1/editor/start", { method: "POST" });
+
+    expect(res.status).toBe(200);
+    const json = await res.json();
+    expect(json).toMatchObject({
+      available: false,
+      installed: false,
+      mode: "host",
+    });
+    expect(json.message).toContain("not installed");
+  });
+
+  it("starts host editor and returns a URL when code-server is available", async () => {
+    launcher.getSession.mockReturnValue({
+      sessionId: "s1",
+      state: "running",
+      cwd: "/repo/my app",
+    });
+    mockResolveBinary.mockImplementation((name: string) => (name === "code-server" ? "/usr/bin/code-server" : null));
+    // Mock fetch so the readiness poll resolves immediately instead of timing out
+    const fetchSpy = vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response("ok", { status: 200 }));
+
+    const res = await app.request("/api/sessions/s1/editor/start", { method: "POST" });
+
+    expect(res.status).toBe(200);
+    const json = await res.json();
+    expect(json).toMatchObject({
+      available: true,
+      installed: true,
+      mode: "host",
+      url: "http://localhost:13338?folder=%2Frepo%2Fmy%20app",
+    });
+    expect(execSync).toHaveBeenCalledWith(
+      expect.stringContaining("--bind-addr 127.0.0.1:13338"),
+      expect.objectContaining({ timeout: 10_000 }),
+    );
+    fetchSpy.mockRestore();
+  });
+
+  it("starts container editor and returns mapped host URL", async () => {
+    launcher.getSession.mockReturnValue({
+      sessionId: "s1",
+      state: "running",
+      cwd: "/repo",
+      containerId: "cid-1",
+    });
+    vi.spyOn(containerManager, "getContainer").mockReturnValue({
+      containerId: "cid-1",
+      name: "companion-s1",
+      image: "the-companion:latest",
+      portMappings: [{ containerPort: 13337, hostPort: 49152 }],
+      hostCwd: "/repo",
+      containerCwd: "/workspace",
+      state: "running",
+    });
+    vi.spyOn(containerManager, "hasBinaryInContainer").mockReturnValue(true);
+    vi.spyOn(containerManager, "isContainerAlive").mockReturnValue("running");
+    const execSpy = vi.spyOn(containerManager, "execInContainer").mockReturnValue("");
+    // Mock fetch so the readiness poll resolves immediately instead of timing out
+    const fetchSpy = vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response("ok", { status: 200 }));
+
+    const res = await app.request("/api/sessions/s1/editor/start", { method: "POST" });
+
+    expect(res.status).toBe(200);
+    const json = await res.json();
+    expect(json).toMatchObject({
+      available: true,
+      installed: true,
+      mode: "container",
+      url: "http://localhost:49152?folder=%2Fworkspace",
+    });
+    expect(execSpy).toHaveBeenCalledWith(
+      "cid-1",
+      expect.arrayContaining(["sh", "-lc"]),
+      10_000,
+    );
+    fetchSpy.mockRestore();
+  });
+});
+
 describe("POST /api/sessions/:id/kill", () => {
   it("returns ok when session is killed", async () => {
-    launcher.kill.mockResolvedValue(true);
+    orchestrator.killSession.mockResolvedValue({ ok: true });
 
     const res = await app.request("/api/sessions/s1/kill", { method: "POST" });
 
     expect(res.status).toBe(200);
     const json = await res.json();
     expect(json).toEqual({ ok: true });
-    expect(launcher.kill).toHaveBeenCalledWith("s1");
+    expect(orchestrator.killSession).toHaveBeenCalledWith("s1");
   });
 
   it("returns 404 when session not found", async () => {
-    launcher.kill.mockResolvedValue(false);
+    orchestrator.killSession.mockResolvedValue({ ok: false });
 
     const res = await app.request("/api/sessions/nonexistent/kill", { method: "POST" });
 
@@ -736,18 +845,18 @@ describe("POST /api/sessions/:id/kill", () => {
 
 describe("POST /api/sessions/:id/relaunch", () => {
   it("returns ok when session is relaunched", async () => {
-    launcher.relaunch.mockResolvedValue({ ok: true });
+    orchestrator.relaunchSession.mockResolvedValue({ ok: true });
 
     const res = await app.request("/api/sessions/s1/relaunch", { method: "POST" });
 
     expect(res.status).toBe(200);
     const json = await res.json();
     expect(json).toEqual({ ok: true });
-    expect(launcher.relaunch).toHaveBeenCalledWith("s1");
+    expect(orchestrator.relaunchSession).toHaveBeenCalledWith("s1");
   });
 
   it("returns 503 with error when container is missing", async () => {
-    launcher.relaunch.mockResolvedValue({
+    orchestrator.relaunchSession.mockResolvedValue({
       ok: false,
       error: 'Container "companion-gone" was removed externally. Please create a new session.',
     });
@@ -760,7 +869,7 @@ describe("POST /api/sessions/:id/relaunch", () => {
   });
 
   it("returns 404 when session not found via relaunch", async () => {
-    launcher.relaunch.mockResolvedValue({ ok: false, error: "Session not found" });
+    orchestrator.relaunchSession.mockResolvedValue({ ok: false, error: "Session not found" });
 
     const res = await app.request("/api/sessions/nonexistent/relaunch", { method: "POST" });
 
@@ -770,29 +879,95 @@ describe("POST /api/sessions/:id/relaunch", () => {
   });
 });
 
+describe("GET /api/sessions/:id/processes/system", () => {
+  it("parses macOS lsof LISTEN lines and returns dev servers", async () => {
+    launcher.getSession.mockReturnValue({
+      sessionId: "s1",
+      cwd: "/repo",
+      state: "running",
+    });
+
+    vi.mocked(execSync)
+      .mockReturnValueOnce(
+        [
+          "COMMAND   PID USER   FD   TYPE             DEVICE SIZE/OFF NODE NAME",
+          "node    12345 test   20u  IPv6 0x123456789      0t0  TCP *:3000 (LISTEN)",
+        ].join("\n"),
+      )
+      .mockReturnValueOnce("node /repo/node_modules/vite/bin/vite.js --port 3000\n");
+
+    const res = await app.request("/api/sessions/s1/processes/system", { method: "GET" });
+
+    expect(res.status).toBe(200);
+    const json = await res.json();
+    expect(json).toEqual({
+      ok: true,
+      processes: [
+        {
+          pid: 12345,
+          command: "node",
+          fullCommand: "node /repo/node_modules/vite/bin/vite.js --port 3000",
+          ports: [3000],
+        },
+      ],
+    });
+  });
+
+  it("includes process cwd and best-effort start time when available", async () => {
+    launcher.getSession.mockReturnValue({
+      sessionId: "s1",
+      cwd: "/repo",
+      state: "running",
+    });
+
+    vi.mocked(execSync)
+      .mockReturnValueOnce(
+        [
+          "COMMAND   PID USER   FD   TYPE             DEVICE SIZE/OFF NODE NAME",
+          "bun     43210 test   20u  IPv4 0x123456789      0t0  TCP *:3457 (LISTEN)",
+        ].join("\n"),
+      )
+      .mockReturnValueOnce("bun run dev\n")
+      .mockReturnValueOnce("p43210\nfcwd\nn/Users/test/project\n")
+      .mockReturnValueOnce("Mon Feb 23 10:00:00 2026\n");
+
+    const res = await app.request("/api/sessions/s1/processes/system", { method: "GET" });
+
+    expect(res.status).toBe(200);
+    const json = await res.json();
+    expect(json.ok).toBe(true);
+    expect(json.processes).toHaveLength(1);
+    expect(json.processes[0]).toMatchObject({
+      pid: 43210,
+      command: "bun",
+      fullCommand: "bun run dev",
+      cwd: "/Users/test/project",
+      ports: [3457],
+    });
+    expect(typeof json.processes[0].startedAt).toBe("number");
+  });
+});
+
 describe("DELETE /api/sessions/:id", () => {
-  it("kills, removes, and closes session", async () => {
+  // Route delegates to orchestrator.deleteSession — detailed cleanup logic
+  // (kill, container removal, worktree, etc.) is tested in session-orchestrator.test.ts
+
+  it("delegates to orchestrator and returns ok", async () => {
+    orchestrator.deleteSession.mockResolvedValue({ ok: true });
+
     const res = await app.request("/api/sessions/s1", { method: "DELETE" });
 
     expect(res.status).toBe(200);
     const json = await res.json();
     expect(json).toMatchObject({ ok: true });
-    expect(launcher.kill).toHaveBeenCalledWith("s1");
-    expect(launcher.removeSession).toHaveBeenCalledWith("s1");
-    expect(bridge.closeSession).toHaveBeenCalledWith("s1");
+    expect(orchestrator.deleteSession).toHaveBeenCalledWith("s1");
   });
 
-  it("kills, removes, cleans up worktree, and closes session", async () => {
-    tracker.getBySession.mockReturnValue({
-      sessionId: "s1",
-      repoRoot: "/repo",
-      branch: "feat",
-      worktreePath: "/wt/feat",
-      createdAt: 1000,
+  it("returns worktree info from orchestrator result", async () => {
+    orchestrator.deleteSession.mockResolvedValue({
+      ok: true,
+      worktree: { cleaned: true, path: "/wt/feat" },
     });
-    tracker.isWorktreeInUse.mockReturnValue(false);
-    vi.mocked(gitUtils.isWorktreeDirty).mockReturnValue(false);
-    vi.mocked(gitUtils.removeWorktree).mockReturnValue({ removed: true });
 
     const res = await app.request("/api/sessions/s1", { method: "DELETE" });
 
@@ -800,41 +975,16 @@ describe("DELETE /api/sessions/:id", () => {
     const json = await res.json();
     expect(json).toMatchObject({ ok: true });
     expect(json.worktree).toMatchObject({ cleaned: true, path: "/wt/feat" });
-    expect(launcher.kill).toHaveBeenCalledWith("s1");
-    expect(launcher.removeSession).toHaveBeenCalledWith("s1");
-    expect(bridge.closeSession).toHaveBeenCalledWith("s1");
-    expect(tracker.removeBySession).toHaveBeenCalledWith("s1");
-    expect(gitUtils.removeWorktree).toHaveBeenCalledWith("/repo", "/wt/feat", {
-      force: false,
-      branchToDelete: undefined,
-    });
-  });
-
-  it("passes branchToDelete when actualBranch differs from branch", async () => {
-    tracker.getBySession.mockReturnValue({
-      sessionId: "s1",
-      repoRoot: "/repo",
-      branch: "feat",
-      actualBranch: "feat-wt-1234",
-      worktreePath: "/wt/feat",
-      createdAt: 1000,
-    });
-    tracker.isWorktreeInUse.mockReturnValue(false);
-    vi.mocked(gitUtils.isWorktreeDirty).mockReturnValue(false);
-    vi.mocked(gitUtils.removeWorktree).mockReturnValue({ removed: true });
-
-    const res = await app.request("/api/sessions/s1", { method: "DELETE" });
-
-    expect(res.status).toBe(200);
-    expect(gitUtils.removeWorktree).toHaveBeenCalledWith("/repo", "/wt/feat", {
-      force: false,
-      branchToDelete: "feat-wt-1234",
-    });
   });
 });
 
 describe("POST /api/sessions/:id/archive", () => {
-  it("kills and archives the session", async () => {
+  // Route delegates to orchestrator.archiveSession — detailed cleanup logic
+  // (kill, container, worktree, Linear transition) is tested in session-orchestrator.test.ts
+
+  it("delegates to orchestrator and returns ok", async () => {
+    orchestrator.archiveSession.mockResolvedValue({ ok: true });
+
     const res = await app.request("/api/sessions/s1/archive", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -844,21 +994,173 @@ describe("POST /api/sessions/:id/archive", () => {
     expect(res.status).toBe(200);
     const json = await res.json();
     expect(json).toMatchObject({ ok: true });
-    expect(launcher.kill).toHaveBeenCalledWith("s1");
-    expect(launcher.setArchived).toHaveBeenCalledWith("s1", true);
-    expect(sessionStore.setArchived).toHaveBeenCalledWith("s1", true);
+    expect(orchestrator.archiveSession).toHaveBeenCalledWith("s1", {
+      force: undefined,
+      linearTransition: undefined,
+    });
+  });
+});
+
+describe("POST /api/sessions/:id/archive — Linear transition", () => {
+  // Route delegates to orchestrator.archiveSession — detailed Linear transition logic
+  // is tested in session-orchestrator.test.ts. Route tests verify correct delegation.
+
+  it("passes linearTransition option to orchestrator", async () => {
+    orchestrator.archiveSession.mockResolvedValue({ ok: true });
+    const res = await app.request("/api/sessions/s1/archive", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ linearTransition: "backlog" }),
+    });
+    expect(res.status).toBe(200);
+    expect(orchestrator.archiveSession).toHaveBeenCalledWith("s1", {
+      force: undefined,
+      linearTransition: "backlog",
+    });
+  });
+
+  it("passes force option to orchestrator", async () => {
+    orchestrator.archiveSession.mockResolvedValue({ ok: true });
+    const res = await app.request("/api/sessions/s1/archive", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ force: true, linearTransition: "configured" }),
+    });
+    expect(res.status).toBe(200);
+    expect(orchestrator.archiveSession).toHaveBeenCalledWith("s1", {
+      force: true,
+      linearTransition: "configured",
+    });
+  });
+
+  it("returns linearTransition result from orchestrator", async () => {
+    orchestrator.archiveSession.mockResolvedValue({
+      ok: true,
+      linearTransition: {
+        ok: true,
+        issue: { id: "i1", identifier: "ENG-1", stateName: "Backlog", stateType: "backlog" },
+      },
+    });
+    const res = await app.request("/api/sessions/s1/archive", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ linearTransition: "backlog" }),
+    });
+    expect(res.status).toBe(200);
+    const json = await res.json();
+    expect(json.ok).toBe(true);
+    expect(json.linearTransition.ok).toBe(true);
+  });
+
+  it("returns linearTransition failure from orchestrator", async () => {
+    orchestrator.archiveSession.mockResolvedValue({
+      ok: true,
+      linearTransition: { ok: false, error: "Linear API error" },
+    });
+    const res = await app.request("/api/sessions/s1/archive", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ linearTransition: "backlog" }),
+    });
+    expect(res.status).toBe(200);
+    const json = await res.json();
+    expect(json.ok).toBe(true);
+    expect(json.linearTransition.ok).toBe(false);
+  });
+});
+
+describe("GET /api/sessions/:id/archive-info", () => {
+  it("returns no linked issue when session has none", async () => {
+    mockGetLinearIssue.mockReturnValue(undefined);
+    const res = await app.request("/api/sessions/s1/archive-info", { method: "GET" });
+    expect(res.status).toBe(200);
+    const json = await res.json();
+    expect(json).toEqual({ hasLinkedIssue: false, issueNotDone: false });
+  });
+
+  it("returns issueNotDone false for completed issues", async () => {
+    mockGetLinearIssue.mockReturnValue({
+      id: "issue-1",
+      identifier: "ENG-42",
+      title: "Done issue",
+      description: "",
+      url: "",
+      branchName: "",
+      priorityLabel: "",
+      stateName: "Done",
+      stateType: "completed",
+      teamName: "Engineering",
+      teamKey: "ENG",
+      teamId: "team-1",
+    });
+    const res = await app.request("/api/sessions/s1/archive-info", { method: "GET" });
+    expect(res.status).toBe(200);
+    const json = await res.json();
+    expect(json.hasLinkedIssue).toBe(true);
+    expect(json.issueNotDone).toBe(false);
+  });
+
+  it("returns transition options for non-done issues", async () => {
+    mockGetLinearIssue.mockReturnValue({
+      id: "issue-1",
+      identifier: "ENG-42",
+      title: "In progress issue",
+      description: "",
+      url: "",
+      branchName: "",
+      priorityLabel: "",
+      stateName: "In Progress",
+      stateType: "started",
+      teamName: "Engineering",
+      teamKey: "ENG",
+      teamId: "team-1",
+    });
+    vi.mocked(settingsManager.getSettings).mockReturnValue({
+      anthropicApiKey: "",
+      anthropicModel: "claude-sonnet-4-6",
+      linearApiKey: "lin_test_key",
+      linearAutoTransition: false,
+      linearAutoTransitionStateId: "",
+      linearAutoTransitionStateName: "",
+      linearArchiveTransition: true,
+      linearArchiveTransitionStateId: "state-custom",
+      linearArchiveTransitionStateName: "Review",
+      linearOAuthClientId: "",
+      linearOAuthClientSecret: "",
+      linearOAuthWebhookSecret: "",
+      linearOAuthAccessToken: "",
+      linearOAuthRefreshToken: "",
+      editorTabEnabled: false,
+      aiValidationEnabled: false,
+      aiValidationAutoApprove: true,
+      aiValidationAutoDeny: false,
+      publicUrl: "",
+      updateChannel: "stable",
+      dockerAutoUpdate: false,
+      updatedAt: 0,
+    });
+    const res = await app.request("/api/sessions/s1/archive-info", { method: "GET" });
+    expect(res.status).toBe(200);
+    const json = await res.json();
+    expect(json.hasLinkedIssue).toBe(true);
+    expect(json.issueNotDone).toBe(true);
+    expect(json.hasBacklogState).toBe(true);
+    expect(json.archiveTransitionConfigured).toBe(true);
+    expect(json.archiveTransitionStateName).toBe("Review");
+    expect(json.issue.identifier).toBe("ENG-42");
   });
 });
 
 describe("POST /api/sessions/:id/unarchive", () => {
-  it("unarchives the session", async () => {
+  it("delegates to orchestrator and returns ok", async () => {
+    orchestrator.unarchiveSession.mockReturnValue({ ok: true });
+
     const res = await app.request("/api/sessions/s1/unarchive", { method: "POST" });
 
     expect(res.status).toBe(200);
     const json = await res.json();
     expect(json).toEqual({ ok: true });
-    expect(launcher.setArchived).toHaveBeenCalledWith("s1", false);
-    expect(sessionStore.setArchived).toHaveBeenCalledWith("s1", false);
+    expect(orchestrator.unarchiveSession).toHaveBeenCalledWith("s1");
   });
 });
 
@@ -902,12 +1204,6 @@ describe("POST /api/envs", () => {
     expect(envManager.createEnv).toHaveBeenCalledWith(
       "Staging",
       { HOST: "staging.example.com" },
-      {
-        dockerfile: undefined,
-        baseImage: undefined,
-        ports: undefined,
-        volumes: undefined,
-      },
     );
   });
 
@@ -978,13 +1274,237 @@ describe("DELETE /api/envs/:slug", () => {
   });
 });
 
+describe("Saved prompts API", () => {
+  it("lists prompts with cwd filter", async () => {
+    // Confirms route passes cwd/scope filter through to prompt manager.
+    const prompts = [
+      {
+        id: "p1",
+        name: "Review",
+        content: "Review this PR",
+        scope: "global" as const,
+        createdAt: 1,
+        updatedAt: 2,
+      },
+    ];
+    vi.mocked(promptManager.listPrompts).mockReturnValue(prompts);
+
+    const res = await app.request("/api/prompts?cwd=%2Frepo", { method: "GET" });
+    expect(res.status).toBe(200);
+    const json = await res.json();
+    expect(json).toEqual(prompts);
+    expect(promptManager.listPrompts).toHaveBeenCalledWith({ cwd: "/repo", scope: undefined });
+  });
+
+  it("creates a prompt with legacy cwd", async () => {
+    // Confirms payload mapping for prompt creation including project cwd.
+    const created = {
+      id: "p1",
+      name: "Review",
+      content: "Review this PR",
+      scope: "project" as const,
+      projectPath: "/repo",
+      projectPaths: ["/repo"],
+      createdAt: 1,
+      updatedAt: 1,
+    };
+    vi.mocked(promptManager.createPrompt).mockReturnValue(created);
+
+    const res = await app.request("/api/prompts", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        name: "Review",
+        content: "Review this PR",
+        scope: "project",
+        cwd: "/repo",
+      }),
+    });
+
+    expect(res.status).toBe(201);
+    expect(promptManager.createPrompt).toHaveBeenCalledWith(
+      "Review",
+      "Review this PR",
+      "project",
+      "/repo",
+      undefined,
+    );
+  });
+
+  it("creates a prompt with projectPaths", async () => {
+    // Confirms projectPaths array is forwarded to prompt manager.
+    const created = {
+      id: "p2",
+      name: "Multi",
+      content: "Multi-project prompt",
+      scope: "project" as const,
+      projectPath: "/repo-a",
+      projectPaths: ["/repo-a", "/repo-b"],
+      createdAt: 1,
+      updatedAt: 1,
+    };
+    vi.mocked(promptManager.createPrompt).mockReturnValue(created);
+
+    const res = await app.request("/api/prompts", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        name: "Multi",
+        content: "Multi-project prompt",
+        scope: "project",
+        projectPaths: ["/repo-a", "/repo-b"],
+      }),
+    });
+
+    expect(res.status).toBe(201);
+    expect(promptManager.createPrompt).toHaveBeenCalledWith(
+      "Multi",
+      "Multi-project prompt",
+      "project",
+      undefined,
+      ["/repo-a", "/repo-b"],
+    );
+  });
+
+  it("updates a prompt", async () => {
+    // Confirms update fields are forwarded verbatim.
+    vi.mocked(promptManager.updatePrompt).mockReturnValue({
+      id: "p1",
+      name: "Updated",
+      content: "Updated content",
+      scope: "global",
+      createdAt: 1,
+      updatedAt: 2,
+    });
+
+    const res = await app.request("/api/prompts/p1", {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ name: "Updated", content: "Updated content" }),
+    });
+    expect(res.status).toBe(200);
+    expect(promptManager.updatePrompt).toHaveBeenCalledWith("p1", {
+      name: "Updated",
+      content: "Updated content",
+      scope: undefined,
+      projectPaths: undefined,
+    });
+  });
+
+  it("updates a prompt scope and projectPaths", async () => {
+    // Confirms scope and projectPaths updates are forwarded.
+    vi.mocked(promptManager.updatePrompt).mockReturnValue({
+      id: "p1",
+      name: "Updated",
+      content: "Updated content",
+      scope: "project",
+      projectPath: "/repo",
+      projectPaths: ["/repo"],
+      createdAt: 1,
+      updatedAt: 2,
+    });
+
+    const res = await app.request("/api/prompts/p1", {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ scope: "project", projectPaths: ["/repo"] }),
+    });
+    expect(res.status).toBe(200);
+    expect(promptManager.updatePrompt).toHaveBeenCalledWith("p1", {
+      name: undefined,
+      content: undefined,
+      scope: "project",
+      projectPaths: ["/repo"],
+    });
+  });
+
+  it("deletes a prompt", async () => {
+    // Confirms delete endpoint calls manager and returns ok shape.
+    vi.mocked(promptManager.deletePrompt).mockReturnValue(true);
+
+    const res = await app.request("/api/prompts/p1", { method: "DELETE" });
+    expect(res.status).toBe(200);
+    const json = await res.json();
+    expect(json).toEqual({ ok: true });
+    expect(promptManager.deletePrompt).toHaveBeenCalledWith("p1");
+  });
+});
+
+// ─── Image Pull Manager API ──────────────────────────────────────────────────
+
+describe("GET /api/images/:tag/status", () => {
+  it("returns the pull state for an image", async () => {
+    mockImagePullGetState.mockReturnValueOnce({
+      image: "the-companion:latest",
+      status: "ready",
+      progress: [],
+    });
+
+    const res = await app.request("/api/images/the-companion%3Alatest/status");
+    expect(res.status).toBe(200);
+    const json = await res.json();
+    expect(json.image).toBe("the-companion:latest");
+    expect(json.status).toBe("ready");
+  });
+});
+
+describe("POST /api/images/:tag/pull", () => {
+  it("triggers a pull and returns the current state", async () => {
+    vi.spyOn(containerManager, "checkDocker").mockReturnValue(true);
+    mockImagePullGetState.mockReturnValueOnce({
+      image: "the-companion:latest",
+      status: "pulling",
+      progress: [],
+      startedAt: Date.now(),
+    });
+
+    const res = await app.request("/api/images/the-companion%3Alatest/pull", {
+      method: "POST",
+    });
+    expect(res.status).toBe(200);
+    const json = await res.json();
+    expect(json.ok).toBe(true);
+    expect(mockImagePullPull).toHaveBeenCalledWith("the-companion:latest");
+  });
+
+  it("returns 503 when Docker is not available", async () => {
+    vi.spyOn(containerManager, "checkDocker").mockReturnValue(false);
+
+    const res = await app.request("/api/images/the-companion%3Alatest/pull", {
+      method: "POST",
+    });
+    expect(res.status).toBe(503);
+    const json = await res.json();
+    expect(json.error).toContain("Docker is not available");
+  });
+});
+
 // ─── Settings ────────────────────────────────────────────────────────────────
 
 describe("GET /api/settings", () => {
   it("returns settings status without exposing the key", async () => {
     vi.mocked(settingsManager.getSettings).mockReturnValue({
-      openrouterApiKey: "or-secret",
-      openrouterModel: "openrouter/free",
+      anthropicApiKey: "or-secret",
+      anthropicModel: "claude-sonnet-4-6",
+      linearApiKey: "",
+      linearAutoTransition: false,
+      linearAutoTransitionStateId: "",
+      linearAutoTransitionStateName: "",
+    linearArchiveTransition: false,
+    linearArchiveTransitionStateId: "",
+    linearArchiveTransitionStateName: "",
+      linearOAuthClientId: "",
+      linearOAuthClientSecret: "",
+      linearOAuthWebhookSecret: "",
+      linearOAuthAccessToken: "",
+      linearOAuthRefreshToken: "",
+      editorTabEnabled: false,
+      aiValidationEnabled: false,
+      aiValidationAutoApprove: true,
+      aiValidationAutoDeny: false,
+      publicUrl: "",
+      updateChannel: "stable",
+      dockerAutoUpdate: false,
       updatedAt: 123,
     });
 
@@ -993,15 +1513,49 @@ describe("GET /api/settings", () => {
     expect(res.status).toBe(200);
     const json = await res.json();
     expect(json).toEqual({
-      openrouterApiKeyConfigured: true,
-      openrouterModel: "openrouter/free",
+      anthropicApiKeyConfigured: true,
+      anthropicModel: "claude-sonnet-4-6",
+      linearApiKeyConfigured: false,
+      linearConnectionCount: 0,
+      linearAutoTransition: false,
+      linearAutoTransitionStateName: "",
+    linearArchiveTransition: false,
+    linearArchiveTransitionStateName: "",
+      linearOAuthConfigured: false,
+      linearOAuthCredentialsSaved: false,
+      editorTabEnabled: false,
+      aiValidationEnabled: false,
+      aiValidationAutoApprove: true,
+      aiValidationAutoDeny: false,
+      publicUrl: "",
+      updateChannel: "stable",
+      dockerAutoUpdate: false,
     });
   });
 
   it("reports key as not configured when empty", async () => {
     vi.mocked(settingsManager.getSettings).mockReturnValue({
-      openrouterApiKey: "",
-      openrouterModel: "openai/gpt-4o-mini",
+      anthropicApiKey: "",
+      anthropicModel: "openai/gpt-4o-mini",
+      linearApiKey: "lin_api_123",
+      linearAutoTransition: false,
+      linearAutoTransitionStateId: "",
+      linearAutoTransitionStateName: "",
+    linearArchiveTransition: false,
+    linearArchiveTransitionStateId: "",
+    linearArchiveTransitionStateName: "",
+      linearOAuthClientId: "",
+      linearOAuthClientSecret: "",
+      linearOAuthWebhookSecret: "",
+      linearOAuthAccessToken: "",
+      linearOAuthRefreshToken: "",
+      editorTabEnabled: false,
+      aiValidationEnabled: false,
+      aiValidationAutoApprove: true,
+      aiValidationAutoDeny: false,
+      publicUrl: "",
+      updateChannel: "stable",
+      dockerAutoUpdate: false,
       updatedAt: 123,
     });
 
@@ -1010,100 +1564,354 @@ describe("GET /api/settings", () => {
     expect(res.status).toBe(200);
     const json = await res.json();
     expect(json).toEqual({
-      openrouterApiKeyConfigured: false,
-      openrouterModel: "openai/gpt-4o-mini",
+      anthropicApiKeyConfigured: false,
+      anthropicModel: "openai/gpt-4o-mini",
+      linearApiKeyConfigured: true,
+      linearConnectionCount: 0,
+      linearAutoTransition: false,
+      linearAutoTransitionStateName: "",
+    linearArchiveTransition: false,
+    linearArchiveTransitionStateName: "",
+      linearOAuthConfigured: false,
+      linearOAuthCredentialsSaved: false,
+      editorTabEnabled: false,
+      aiValidationEnabled: false,
+      aiValidationAutoApprove: true,
+      aiValidationAutoDeny: false,
+      publicUrl: "",
+      updateChannel: "stable",
+      dockerAutoUpdate: false,
     });
+  });
+
+  // Verifies publicUrl is included in GET response when set to a non-empty value
+  it("includes publicUrl in response when configured", async () => {
+    vi.mocked(settingsManager.getSettings).mockReturnValue({
+      anthropicApiKey: "",
+      anthropicModel: "claude-sonnet-4-6",
+      linearApiKey: "",
+      linearAutoTransition: false,
+      linearAutoTransitionStateId: "",
+      linearAutoTransitionStateName: "",
+      linearArchiveTransition: false,
+      linearArchiveTransitionStateId: "",
+      linearArchiveTransitionStateName: "",
+      linearOAuthClientId: "",
+      linearOAuthClientSecret: "",
+      linearOAuthWebhookSecret: "",
+      linearOAuthAccessToken: "",
+      linearOAuthRefreshToken: "",
+      editorTabEnabled: false,
+      aiValidationEnabled: false,
+      aiValidationAutoApprove: true,
+      aiValidationAutoDeny: false,
+      publicUrl: "https://example.com",
+      updateChannel: "stable",
+      dockerAutoUpdate: false,
+      updatedAt: 100,
+    });
+
+    const res = await app.request("/api/settings", { method: "GET" });
+
+    expect(res.status).toBe(200);
+    const json = await res.json();
+    expect(json.publicUrl).toBe("https://example.com");
   });
 });
 
 describe("PUT /api/settings", () => {
   it("updates settings", async () => {
     vi.mocked(settingsManager.updateSettings).mockReturnValue({
-      openrouterApiKey: "new-key",
-      openrouterModel: "openrouter/free",
+      anthropicApiKey: "new-key",
+      anthropicModel: "claude-sonnet-4-6",
+      linearApiKey: "",
+      linearAutoTransition: false,
+      linearAutoTransitionStateId: "",
+      linearAutoTransitionStateName: "",
+    linearArchiveTransition: false,
+    linearArchiveTransitionStateId: "",
+    linearArchiveTransitionStateName: "",
+      linearOAuthClientId: "",
+      linearOAuthClientSecret: "",
+      linearOAuthWebhookSecret: "",
+      linearOAuthAccessToken: "",
+      linearOAuthRefreshToken: "",
+      editorTabEnabled: false,
+      aiValidationEnabled: false,
+      aiValidationAutoApprove: true,
+      aiValidationAutoDeny: false,
+      publicUrl: "",
+      updateChannel: "stable",
+      dockerAutoUpdate: false,
       updatedAt: 456,
     });
 
     const res = await app.request("/api/settings", {
       method: "PUT",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ openrouterApiKey: "new-key" }),
+      body: JSON.stringify({ anthropicApiKey: "new-key" }),
     });
 
     expect(res.status).toBe(200);
     expect(settingsManager.updateSettings).toHaveBeenCalledWith({
-      openrouterApiKey: "new-key",
-      openrouterModel: undefined,
+      anthropicApiKey: "new-key",
+      anthropicModel: undefined,
+      linearApiKey: undefined,
+      linearAutoTransition: undefined,
+      linearAutoTransitionStateId: undefined,
+      linearAutoTransitionStateName: undefined,
+      linearArchiveTransition: undefined,
+      linearArchiveTransitionStateId: undefined,
+      linearArchiveTransitionStateName: undefined,
+      linearOAuthClientId: undefined,
+      linearOAuthClientSecret: undefined,
+      linearOAuthWebhookSecret: undefined,
+      editorTabEnabled: undefined,
+      aiValidationEnabled: undefined,
+      aiValidationAutoApprove: undefined,
+      aiValidationAutoDeny: undefined,
+      updateChannel: undefined,
     });
     const json = await res.json();
     expect(json).toEqual({
-      openrouterApiKeyConfigured: true,
-      openrouterModel: "openrouter/free",
+      anthropicApiKeyConfigured: true,
+      anthropicModel: "claude-sonnet-4-6",
+      linearApiKeyConfigured: false,
+      linearConnectionCount: 0,
+      linearAutoTransition: false,
+      linearAutoTransitionStateName: "",
+    linearArchiveTransition: false,
+    linearArchiveTransitionStateName: "",
+      linearOAuthConfigured: false,
+      linearOAuthCredentialsSaved: false,
+      editorTabEnabled: false,
+      aiValidationEnabled: false,
+      aiValidationAutoApprove: true,
+      aiValidationAutoDeny: false,
+      publicUrl: "",
+      updateChannel: "stable",
+      dockerAutoUpdate: false,
     });
   });
 
   it("trims key and falls back to default model for blank value", async () => {
     vi.mocked(settingsManager.updateSettings).mockReturnValue({
-      openrouterApiKey: "trimmed-key",
-      openrouterModel: "openrouter/free",
+      anthropicApiKey: "trimmed-key",
+      anthropicModel: "claude-sonnet-4-6",
+      linearApiKey: "lin_api_trimmed",
+      linearAutoTransition: false,
+      linearAutoTransitionStateId: "",
+      linearAutoTransitionStateName: "",
+    linearArchiveTransition: false,
+    linearArchiveTransitionStateId: "",
+    linearArchiveTransitionStateName: "",
+      linearOAuthClientId: "",
+      linearOAuthClientSecret: "",
+      linearOAuthWebhookSecret: "",
+      linearOAuthAccessToken: "",
+      linearOAuthRefreshToken: "",
+      editorTabEnabled: false,
+      aiValidationEnabled: false,
+      aiValidationAutoApprove: true,
+      aiValidationAutoDeny: false,
+      publicUrl: "",
+      updateChannel: "stable",
+      dockerAutoUpdate: false,
       updatedAt: 789,
     });
 
     const res = await app.request("/api/settings", {
       method: "PUT",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ openrouterApiKey: "  trimmed-key  ", openrouterModel: "   " }),
+      body: JSON.stringify({ anthropicApiKey: "  trimmed-key  ", anthropicModel: "   ", linearApiKey: "  lin_api_trimmed  " }),
     });
 
     expect(res.status).toBe(200);
     expect(settingsManager.updateSettings).toHaveBeenCalledWith({
-      openrouterApiKey: "trimmed-key",
-      openrouterModel: "openrouter/free",
+      anthropicApiKey: "trimmed-key",
+      anthropicModel: "claude-sonnet-4-6",
+      linearApiKey: "lin_api_trimmed",
+      linearAutoTransition: undefined,
+      linearAutoTransitionStateId: undefined,
+      linearAutoTransitionStateName: undefined,
+      editorTabEnabled: undefined,
     });
   });
 
   it("updates only model without overriding key", async () => {
     vi.mocked(settingsManager.updateSettings).mockReturnValue({
-      openrouterApiKey: "existing-key",
-      openrouterModel: "openai/gpt-4o-mini",
+      anthropicApiKey: "existing-key",
+      anthropicModel: "openai/gpt-4o-mini",
+      linearApiKey: "lin_api_existing",
+      linearAutoTransition: false,
+      linearAutoTransitionStateId: "",
+      linearAutoTransitionStateName: "",
+    linearArchiveTransition: false,
+    linearArchiveTransitionStateId: "",
+    linearArchiveTransitionStateName: "",
+      linearOAuthClientId: "",
+      linearOAuthClientSecret: "",
+      linearOAuthWebhookSecret: "",
+      linearOAuthAccessToken: "",
+      linearOAuthRefreshToken: "",
+      editorTabEnabled: false,
+      aiValidationEnabled: false,
+      aiValidationAutoApprove: true,
+      aiValidationAutoDeny: false,
+      publicUrl: "",
+      updateChannel: "stable",
+      dockerAutoUpdate: false,
       updatedAt: 999,
     });
 
     const res = await app.request("/api/settings", {
       method: "PUT",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ openrouterModel: "openai/gpt-4o-mini" }),
+      body: JSON.stringify({ anthropicModel: "openai/gpt-4o-mini" }),
     });
 
     expect(res.status).toBe(200);
     expect(settingsManager.updateSettings).toHaveBeenCalledWith({
-      openrouterApiKey: undefined,
-      openrouterModel: "openai/gpt-4o-mini",
+      anthropicApiKey: undefined,
+      anthropicModel: "openai/gpt-4o-mini",
+      linearApiKey: undefined,
+      linearAutoTransition: undefined,
+      linearAutoTransitionStateId: undefined,
+      linearAutoTransitionStateName: undefined,
+      editorTabEnabled: undefined,
     });
+  });
+
+  it("returns 400 for non-string linear key", async () => {
+    const res = await app.request("/api/settings", {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ linearApiKey: 123 }),
+    });
+
+    expect(res.status).toBe(400);
+    const json = await res.json();
+    expect(json).toEqual({ error: "linearApiKey must be a string" });
   });
 
   it("returns 400 for non-string model", async () => {
     const res = await app.request("/api/settings", {
       method: "PUT",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ openrouterApiKey: "new-key", openrouterModel: 123 }),
+      body: JSON.stringify({ anthropicApiKey: "new-key", anthropicModel: 123 }),
     });
 
     expect(res.status).toBe(400);
     const json = await res.json();
-    expect(json).toEqual({ error: "openrouterModel must be a string" });
+    expect(json).toEqual({ error: "anthropicModel must be a string" });
   });
 
   it("returns 400 for non-string key", async () => {
     const res = await app.request("/api/settings", {
       method: "PUT",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ openrouterApiKey: 123 }),
+      body: JSON.stringify({ anthropicApiKey: 123 }),
     });
 
     expect(res.status).toBe(400);
     const json = await res.json();
-    expect(json).toEqual({ error: "openrouterApiKey must be a string" });
+    expect(json).toEqual({ error: "anthropicApiKey must be a string" });
+  });
+
+  it("returns 400 for non-boolean editor tab setting", async () => {
+    const res = await app.request("/api/settings", {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ editorTabEnabled: "yes" }),
+    });
+
+    expect(res.status).toBe(400);
+    const json = await res.json();
+    expect(json).toEqual({ error: "editorTabEnabled must be a boolean" });
+  });
+
+  // Rejects invalid updateChannel values that aren't "stable" or "prerelease"
+  it("returns 400 for invalid updateChannel value", async () => {
+    const res = await app.request("/api/settings", {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ updateChannel: "nightly" }),
+    });
+
+    expect(res.status).toBe(400);
+    const json = await res.json();
+    expect(json).toEqual({ error: "updateChannel must be 'stable' or 'prerelease'" });
+  });
+
+  // Verifies that PUT /api/settings accepts a publicUrl string and passes
+  // it (trimmed, trailing-slash-stripped) to updateSettings
+  it("accepts and saves publicUrl string", async () => {
+    vi.mocked(settingsManager.updateSettings).mockReturnValue({
+      anthropicApiKey: "",
+      anthropicModel: "claude-sonnet-4-6",
+      linearApiKey: "",
+      linearAutoTransition: false,
+      linearAutoTransitionStateId: "",
+      linearAutoTransitionStateName: "",
+      linearArchiveTransition: false,
+      linearArchiveTransitionStateId: "",
+      linearArchiveTransitionStateName: "",
+      linearOAuthClientId: "",
+      linearOAuthClientSecret: "",
+      linearOAuthWebhookSecret: "",
+      linearOAuthAccessToken: "",
+      linearOAuthRefreshToken: "",
+      editorTabEnabled: false,
+      aiValidationEnabled: false,
+      aiValidationAutoApprove: true,
+      aiValidationAutoDeny: false,
+      publicUrl: "https://my-server.com",
+      updateChannel: "stable",
+      dockerAutoUpdate: false,
+      updatedAt: 500,
+    });
+
+    const res = await app.request("/api/settings", {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ publicUrl: "  https://my-server.com///  " }),
+    });
+
+    expect(res.status).toBe(200);
+    // The route trims whitespace and strips trailing slashes before calling updateSettings
+    expect(settingsManager.updateSettings).toHaveBeenCalledWith(
+      expect.objectContaining({
+        publicUrl: "https://my-server.com",
+      }),
+    );
+    const json = await res.json();
+    expect(json.publicUrl).toBe("https://my-server.com");
+  });
+
+  // Rejects non-string publicUrl values with a 400 error
+  it("returns 400 for non-string publicUrl", async () => {
+    const res = await app.request("/api/settings", {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ publicUrl: 123 }),
+    });
+
+    expect(res.status).toBe(400);
+    const json = await res.json();
+    expect(json).toEqual({ error: "publicUrl must be a string" });
+  });
+
+  // Rejects publicUrl values that are not valid http/https URLs
+  it("returns 400 for publicUrl with invalid scheme", async () => {
+    const res = await app.request("/api/settings", {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ publicUrl: "ftp://bad-scheme.com" }),
+    });
+
+    expect(res.status).toBe(400);
+    const json = await res.json();
+    expect(json).toEqual({ error: "publicUrl must be a valid http/https URL" });
   });
 
   it("returns 400 when no settings fields are provided", async () => {
@@ -1119,6 +1927,1091 @@ describe("PUT /api/settings", () => {
   });
 });
 
+describe("POST /api/settings/anthropic/verify", () => {
+  it("returns 400 when no apiKey provided", async () => {
+    // Verifies the endpoint rejects requests that omit the apiKey field
+    const res = await app.request("/api/settings/anthropic/verify", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({}),
+    });
+
+    expect(res.status).toBe(400);
+    const json = await res.json();
+    expect(json).toEqual({ valid: false, error: "API key is required" });
+  });
+
+  it("returns valid:true when fetch succeeds", async () => {
+    // Verifies successful Anthropic API key validation when the upstream API responds ok
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const res = await app.request("/api/settings/anthropic/verify", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ apiKey: "sk-ant-valid-key" }),
+    });
+
+    expect(res.status).toBe(200);
+    const json = await res.json();
+    expect(json).toEqual({ valid: true });
+
+    // Verify the correct Anthropic API endpoint and headers were used
+    expect(fetchMock).toHaveBeenCalledWith(
+      "https://api.anthropic.com/v1/models",
+      expect.objectContaining({
+        headers: expect.objectContaining({
+          "x-api-key": "sk-ant-valid-key",
+          "anthropic-version": "2023-06-01",
+        }),
+      }),
+    );
+
+    vi.unstubAllGlobals();
+  });
+
+  it("returns valid:false with error when fetch returns non-ok", async () => {
+    // Verifies the endpoint correctly reports invalid keys when the Anthropic API rejects them
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: false,
+      status: 401,
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const res = await app.request("/api/settings/anthropic/verify", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ apiKey: "sk-ant-invalid-key" }),
+    });
+
+    expect(res.status).toBe(200);
+    const json = await res.json();
+    expect(json).toEqual({ valid: false, error: "API returned 401" });
+
+    vi.unstubAllGlobals();
+  });
+
+  it("returns valid:false when fetch throws", async () => {
+    // Verifies graceful error handling when the network request itself fails
+    const fetchMock = vi.fn().mockRejectedValue(new Error("Network error"));
+    vi.stubGlobal("fetch", fetchMock);
+
+    const res = await app.request("/api/settings/anthropic/verify", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ apiKey: "sk-ant-some-key" }),
+    });
+
+    expect(res.status).toBe(200);
+    const json = await res.json();
+    expect(json).toEqual({ valid: false, error: "Request failed" });
+
+    vi.unstubAllGlobals();
+  });
+});
+
+describe("GET /api/linear/issues", () => {
+  it("returns empty list when query is blank", async () => {
+    const res = await app.request("/api/linear/issues?query=   ", { method: "GET" });
+    expect(res.status).toBe(200);
+    const json = await res.json();
+    expect(json).toEqual({ issues: [] });
+  });
+
+  it("returns 400 when linear key is not configured", async () => {
+    vi.mocked(settingsManager.getSettings).mockReturnValue({
+      anthropicApiKey: "",
+      anthropicModel: "claude-sonnet-4-6",
+      linearApiKey: "",
+      linearAutoTransition: false,
+      linearAutoTransitionStateId: "",
+      linearAutoTransitionStateName: "",
+    linearArchiveTransition: false,
+    linearArchiveTransitionStateId: "",
+    linearArchiveTransitionStateName: "",
+      linearOAuthClientId: "",
+      linearOAuthClientSecret: "",
+      linearOAuthWebhookSecret: "",
+      linearOAuthAccessToken: "",
+      linearOAuthRefreshToken: "",
+      editorTabEnabled: false,
+      aiValidationEnabled: false,
+      aiValidationAutoApprove: true,
+      aiValidationAutoDeny: false,
+      publicUrl: "",
+      updateChannel: "stable",
+      dockerAutoUpdate: false,
+      updatedAt: 0,
+    });
+    vi.mocked(resolveApiKey).mockReturnValue(null);
+
+    const res = await app.request("/api/linear/issues?query=auth", { method: "GET" });
+    expect(res.status).toBe(400);
+    const json = await res.json();
+    expect(json).toEqual({ error: "No Linear connection configured" });
+  });
+
+  it("proxies Linear issue search results with branchName", async () => {
+    vi.mocked(settingsManager.getSettings).mockReturnValue({
+      anthropicApiKey: "",
+      anthropicModel: "claude-sonnet-4-6",
+      linearApiKey: "lin_api_123",
+      linearAutoTransition: false,
+      linearAutoTransitionStateId: "",
+      linearAutoTransitionStateName: "",
+    linearArchiveTransition: false,
+    linearArchiveTransitionStateId: "",
+    linearArchiveTransitionStateName: "",
+      linearOAuthClientId: "",
+      linearOAuthClientSecret: "",
+      linearOAuthWebhookSecret: "",
+      linearOAuthAccessToken: "",
+      linearOAuthRefreshToken: "",
+      editorTabEnabled: false,
+      aiValidationEnabled: false,
+      aiValidationAutoApprove: true,
+      aiValidationAutoDeny: false,
+      publicUrl: "",
+      updateChannel: "stable",
+      dockerAutoUpdate: false,
+      updatedAt: 0,
+    });
+
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      statusText: "OK",
+      json: async () => ({
+        data: {
+          searchIssues: {
+            nodes: [{
+              id: "issue-id",
+              identifier: "ENG-123",
+              title: "Fix auth flow",
+              description: "401 on refresh token",
+              url: "https://linear.app/acme/issue/ENG-123/fix-auth-flow",
+              branchName: "eng-123-fix-auth-flow",
+              priorityLabel: "High",
+              state: { name: "In Progress", type: "started" },
+              team: { id: "team-eng-1", key: "ENG", name: "Engineering" },
+            }],
+          },
+        },
+      }),
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const res = await app.request("/api/linear/issues?query=auth&limit=5", { method: "GET" });
+    expect(res.status).toBe(200);
+    const json = await res.json();
+    expect(json).toEqual({
+      issues: [{
+        id: "issue-id",
+        identifier: "ENG-123",
+        title: "Fix auth flow",
+        description: "401 on refresh token",
+        url: "https://linear.app/acme/issue/ENG-123/fix-auth-flow",
+        branchName: "eng-123-fix-auth-flow",
+        priorityLabel: "High",
+        stateName: "In Progress",
+        stateType: "started",
+        teamName: "Engineering",
+        teamKey: "ENG",
+        teamId: "team-eng-1",
+      }],
+    });
+    expect(fetchMock).toHaveBeenCalledWith(
+      "https://api.linear.app/graphql",
+      expect.objectContaining({
+        method: "POST",
+        headers: expect.objectContaining({ Authorization: "lin_api_123" }),
+      }),
+    );
+    const [, requestInit] = vi.mocked(fetchMock).mock.calls[0];
+    const requestBody = JSON.parse(String(requestInit?.body ?? "{}"));
+    // Verify branchName is requested in the GraphQL query
+    expect(requestBody.query).toContain("branchName");
+    expect(requestBody.query).toContain("searchIssues(term: $term, first: $first)");
+    expect(requestBody.variables).toEqual({ term: "auth", first: 5 });
+    vi.unstubAllGlobals();
+  });
+
+  it("returns only active issues and orders backlog-like before in-progress", async () => {
+    // The home page issue picker should hide done/cancelled work and show backlog-like
+    // items before currently started ones.
+    vi.mocked(settingsManager.getSettings).mockReturnValue({
+      anthropicApiKey: "",
+      anthropicModel: "claude-sonnet-4-6",
+      linearApiKey: "lin_api_123",
+      linearAutoTransition: false,
+      linearAutoTransitionStateId: "",
+      linearAutoTransitionStateName: "",
+    linearArchiveTransition: false,
+    linearArchiveTransitionStateId: "",
+    linearArchiveTransitionStateName: "",
+      linearOAuthClientId: "",
+      linearOAuthClientSecret: "",
+      linearOAuthWebhookSecret: "",
+      linearOAuthAccessToken: "",
+      linearOAuthRefreshToken: "",
+      editorTabEnabled: false,
+      aiValidationEnabled: false,
+      aiValidationAutoApprove: true,
+      aiValidationAutoDeny: false,
+      publicUrl: "",
+      updateChannel: "stable",
+      dockerAutoUpdate: false,
+      updatedAt: 0,
+    });
+
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      statusText: "OK",
+      json: async () => ({
+        data: {
+          searchIssues: {
+            nodes: [
+              {
+                id: "done-1",
+                identifier: "ENG-10",
+                title: "Already done",
+                description: "",
+                url: "https://linear.app/acme/issue/ENG-10",
+                branchName: null,
+                priorityLabel: null,
+                state: { name: "Done", type: "completed" },
+                team: { id: "team-1", key: "ENG", name: "Engineering" },
+              },
+              {
+                id: "started-1",
+                identifier: "ENG-11",
+                title: "Implement feature",
+                description: "",
+                url: "https://linear.app/acme/issue/ENG-11",
+                branchName: null,
+                priorityLabel: null,
+                state: { name: "In Progress", type: "started" },
+                team: { id: "team-1", key: "ENG", name: "Engineering" },
+              },
+              {
+                id: "backlog-1",
+                identifier: "ENG-12",
+                title: "Investigate bug",
+                description: "",
+                url: "https://linear.app/acme/issue/ENG-12",
+                branchName: null,
+                priorityLabel: null,
+                state: { name: "Backlog", type: "unstarted" },
+                team: { id: "team-1", key: "ENG", name: "Engineering" },
+              },
+              {
+                id: "cancelled-1",
+                identifier: "ENG-13",
+                title: "Won't do",
+                description: "",
+                url: "https://linear.app/acme/issue/ENG-13",
+                branchName: null,
+                priorityLabel: null,
+                state: { name: "Cancelled", type: "cancelled" },
+                team: { id: "team-1", key: "ENG", name: "Engineering" },
+              },
+            ],
+          },
+        },
+      }),
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const res = await app.request("/api/linear/issues?query=eng", { method: "GET" });
+    expect(res.status).toBe(200);
+    const json = await res.json();
+    expect(json.issues.map((i: { identifier: string }) => i.identifier)).toEqual(["ENG-12", "ENG-11"]);
+    vi.unstubAllGlobals();
+  });
+
+  it("returns empty branchName when Linear does not provide one", async () => {
+    // Verifies fallback: when branchName is null/missing from Linear API,
+    // the response maps it to an empty string so the frontend can generate a slug
+    vi.mocked(settingsManager.getSettings).mockReturnValue({
+      anthropicApiKey: "",
+      anthropicModel: "claude-sonnet-4-6",
+      linearApiKey: "lin_api_123",
+      linearAutoTransition: false,
+      linearAutoTransitionStateId: "",
+      linearAutoTransitionStateName: "",
+    linearArchiveTransition: false,
+    linearArchiveTransitionStateId: "",
+    linearArchiveTransitionStateName: "",
+      linearOAuthClientId: "",
+      linearOAuthClientSecret: "",
+      linearOAuthWebhookSecret: "",
+      linearOAuthAccessToken: "",
+      linearOAuthRefreshToken: "",
+      editorTabEnabled: false,
+      aiValidationEnabled: false,
+      aiValidationAutoApprove: true,
+      aiValidationAutoDeny: false,
+      publicUrl: "",
+      updateChannel: "stable",
+      dockerAutoUpdate: false,
+      updatedAt: 0,
+    });
+
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      statusText: "OK",
+      json: async () => ({
+        data: {
+          searchIssues: {
+            nodes: [{
+              id: "issue-id-2",
+              identifier: "ENG-456",
+              title: "Add dark mode",
+              description: null,
+              url: "https://linear.app/acme/issue/ENG-456/add-dark-mode",
+              branchName: null,
+              priorityLabel: null,
+              state: null,
+              team: null,
+            }],
+          },
+        },
+      }),
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const res = await app.request("/api/linear/issues?query=dark", { method: "GET" });
+    expect(res.status).toBe(200);
+    const json = await res.json();
+    expect(json.issues[0].branchName).toBe("");
+    vi.unstubAllGlobals();
+  });
+});
+
+describe("GET /api/linear/connection", () => {
+  it("returns 400 when linear key is not configured", async () => {
+    vi.mocked(settingsManager.getSettings).mockReturnValue({
+      anthropicApiKey: "",
+      anthropicModel: "claude-sonnet-4-6",
+      linearApiKey: "",
+      linearAutoTransition: false,
+      linearAutoTransitionStateId: "",
+      linearAutoTransitionStateName: "",
+    linearArchiveTransition: false,
+    linearArchiveTransitionStateId: "",
+    linearArchiveTransitionStateName: "",
+      linearOAuthClientId: "",
+      linearOAuthClientSecret: "",
+      linearOAuthWebhookSecret: "",
+      linearOAuthAccessToken: "",
+      linearOAuthRefreshToken: "",
+      editorTabEnabled: false,
+      aiValidationEnabled: false,
+      aiValidationAutoApprove: true,
+      aiValidationAutoDeny: false,
+      publicUrl: "",
+      updateChannel: "stable",
+      dockerAutoUpdate: false,
+      updatedAt: 0,
+    });
+    vi.mocked(resolveApiKey).mockReturnValue(null);
+
+    const res = await app.request("/api/linear/connection", { method: "GET" });
+    expect(res.status).toBe(400);
+    const json = await res.json();
+    expect(json).toEqual({ error: "No Linear connection configured" });
+  });
+
+  it("returns viewer/team info when connection works", async () => {
+    vi.mocked(settingsManager.getSettings).mockReturnValue({
+      anthropicApiKey: "",
+      anthropicModel: "claude-sonnet-4-6",
+      linearApiKey: "lin_api_123",
+      linearAutoTransition: false,
+      linearAutoTransitionStateId: "",
+      linearAutoTransitionStateName: "",
+    linearArchiveTransition: false,
+    linearArchiveTransitionStateId: "",
+    linearArchiveTransitionStateName: "",
+      linearOAuthClientId: "",
+      linearOAuthClientSecret: "",
+      linearOAuthWebhookSecret: "",
+      linearOAuthAccessToken: "",
+      linearOAuthRefreshToken: "",
+      editorTabEnabled: false,
+      aiValidationEnabled: false,
+      aiValidationAutoApprove: true,
+      aiValidationAutoDeny: false,
+      publicUrl: "",
+      updateChannel: "stable",
+      dockerAutoUpdate: false,
+      updatedAt: 0,
+    });
+
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      statusText: "OK",
+      json: async () => ({
+        data: {
+          viewer: { id: "u1", name: "Ada", email: "ada@example.com" },
+          teams: { nodes: [{ id: "t1", key: "ENG", name: "Engineering" }] },
+        },
+      }),
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const res = await app.request("/api/linear/connection", { method: "GET" });
+    expect(res.status).toBe(200);
+    const json = await res.json();
+    expect(json).toEqual({
+      connected: true,
+      viewerId: "u1",
+      viewerName: "Ada",
+      viewerEmail: "ada@example.com",
+      teamName: "Engineering",
+      teamKey: "ENG",
+    });
+    vi.unstubAllGlobals();
+  });
+});
+
+describe("POST /api/linear/issues/:id/transition", () => {
+  // Skips when auto-transition is disabled in settings
+  it("skips when auto-transition is disabled", async () => {
+    vi.mocked(settingsManager.getSettings).mockReturnValue({
+      anthropicApiKey: "",
+      anthropicModel: "claude-sonnet-4-6",
+      linearApiKey: "lin_api_123",
+      linearAutoTransition: false,
+      linearAutoTransitionStateId: "state-123",
+      linearAutoTransitionStateName: "In Progress",
+    linearArchiveTransition: false,
+    linearArchiveTransitionStateId: "",
+    linearArchiveTransitionStateName: "",
+      linearOAuthClientId: "",
+      linearOAuthClientSecret: "",
+      linearOAuthWebhookSecret: "",
+      linearOAuthAccessToken: "",
+      linearOAuthRefreshToken: "",
+      editorTabEnabled: false,
+      aiValidationEnabled: false,
+      aiValidationAutoApprove: true,
+      aiValidationAutoDeny: false,
+      publicUrl: "",
+      updateChannel: "stable",
+      dockerAutoUpdate: false,
+      updatedAt: 0,
+    });
+
+    const res = await app.request("/api/linear/issues/issue-123/transition", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({}),
+    });
+    expect(res.status).toBe(200);
+    const json = await res.json();
+    expect(json).toEqual({ ok: true, skipped: true, reason: "auto_transition_disabled" });
+  });
+
+  // Skips when no target state is configured
+  it("skips when no target state is configured", async () => {
+    vi.mocked(settingsManager.getSettings).mockReturnValue({
+      anthropicApiKey: "",
+      anthropicModel: "claude-sonnet-4-6",
+      linearApiKey: "lin_api_123",
+      linearAutoTransition: true,
+      linearAutoTransitionStateId: "",
+      linearAutoTransitionStateName: "",
+    linearArchiveTransition: false,
+    linearArchiveTransitionStateId: "",
+    linearArchiveTransitionStateName: "",
+      linearOAuthClientId: "",
+      linearOAuthClientSecret: "",
+      linearOAuthWebhookSecret: "",
+      linearOAuthAccessToken: "",
+      linearOAuthRefreshToken: "",
+      editorTabEnabled: false,
+      aiValidationEnabled: false,
+      aiValidationAutoApprove: true,
+      aiValidationAutoDeny: false,
+      publicUrl: "",
+      updateChannel: "stable",
+      dockerAutoUpdate: false,
+      updatedAt: 0,
+    });
+
+    const res = await app.request("/api/linear/issues/issue-123/transition", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({}),
+    });
+    expect(res.status).toBe(200);
+    const json = await res.json();
+    expect(json).toEqual({ ok: true, skipped: true, reason: "no_target_state_configured" });
+  });
+
+  it("returns 400 when linear key is not configured", async () => {
+    vi.mocked(settingsManager.getSettings).mockReturnValue({
+      anthropicApiKey: "",
+      anthropicModel: "claude-sonnet-4-6",
+      linearApiKey: "",
+      linearAutoTransition: true,
+      linearAutoTransitionStateId: "state-123",
+      linearAutoTransitionStateName: "In Progress",
+    linearArchiveTransition: false,
+    linearArchiveTransitionStateId: "",
+    linearArchiveTransitionStateName: "",
+      linearOAuthClientId: "",
+      linearOAuthClientSecret: "",
+      linearOAuthWebhookSecret: "",
+      linearOAuthAccessToken: "",
+      linearOAuthRefreshToken: "",
+      editorTabEnabled: false,
+      aiValidationEnabled: false,
+      aiValidationAutoApprove: true,
+      aiValidationAutoDeny: false,
+      publicUrl: "",
+      updateChannel: "stable",
+      dockerAutoUpdate: false,
+      updatedAt: 0,
+    });
+    vi.mocked(resolveApiKey).mockReturnValue(null);
+
+    const res = await app.request("/api/linear/issues/issue-123/transition", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({}),
+    });
+    expect(res.status).toBe(400);
+    const json = await res.json();
+    expect(json).toEqual({ error: "No Linear connection configured" });
+  });
+
+  // Happy path: uses configured stateId to update the issue directly
+  it("transitions issue to configured state", async () => {
+    vi.mocked(settingsManager.getSettings).mockReturnValue({
+      anthropicApiKey: "",
+      anthropicModel: "claude-sonnet-4-6",
+      linearApiKey: "lin_api_123",
+      linearAutoTransition: true,
+      linearAutoTransitionStateId: "state-doing",
+      linearAutoTransitionStateName: "Doing",
+    linearArchiveTransition: false,
+    linearArchiveTransitionStateId: "",
+    linearArchiveTransitionStateName: "",
+      linearOAuthClientId: "",
+      linearOAuthClientSecret: "",
+      linearOAuthWebhookSecret: "",
+      linearOAuthAccessToken: "",
+      linearOAuthRefreshToken: "",
+      editorTabEnabled: false,
+      aiValidationEnabled: false,
+      aiValidationAutoApprove: true,
+      aiValidationAutoDeny: false,
+      publicUrl: "",
+      updateChannel: "stable",
+      dockerAutoUpdate: false,
+      updatedAt: 0,
+    });
+
+    const fetchMock = vi.fn().mockResolvedValueOnce({
+      ok: true,
+      statusText: "OK",
+      json: async () => ({
+        data: {
+          issueUpdate: {
+            success: true,
+            issue: {
+              id: "issue-123",
+              identifier: "ENG-456",
+              state: { name: "Doing", type: "started" },
+            },
+          },
+        },
+      }),
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const res = await app.request("/api/linear/issues/issue-123/transition", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({}),
+    });
+    expect(res.status).toBe(200);
+    const json = await res.json();
+    expect(json).toEqual({
+      ok: true,
+      skipped: false,
+      issue: {
+        id: "issue-123",
+        identifier: "ENG-456",
+        stateName: "Doing",
+        stateType: "started",
+      },
+    });
+
+    // Verify only one GraphQL call (no states query needed)
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    const body = JSON.parse(String(fetchMock.mock.calls[0][1]?.body ?? "{}"));
+    expect(body.query).toContain("issueUpdate");
+    expect(body.variables).toEqual({ issueId: "issue-123", stateId: "state-doing" });
+
+    vi.unstubAllGlobals();
+  });
+
+  // Error case: Linear API returns an error when updating issue state
+  it("returns 502 when issue update fails", async () => {
+    vi.mocked(settingsManager.getSettings).mockReturnValue({
+      anthropicApiKey: "",
+      anthropicModel: "claude-sonnet-4-6",
+      linearApiKey: "lin_api_123",
+      linearAutoTransition: true,
+      linearAutoTransitionStateId: "state-doing",
+      linearAutoTransitionStateName: "Doing",
+    linearArchiveTransition: false,
+    linearArchiveTransitionStateId: "",
+    linearArchiveTransitionStateName: "",
+      linearOAuthClientId: "",
+      linearOAuthClientSecret: "",
+      linearOAuthWebhookSecret: "",
+      linearOAuthAccessToken: "",
+      linearOAuthRefreshToken: "",
+      editorTabEnabled: false,
+      aiValidationEnabled: false,
+      aiValidationAutoApprove: true,
+      aiValidationAutoDeny: false,
+      publicUrl: "",
+      updateChannel: "stable",
+      dockerAutoUpdate: false,
+      updatedAt: 0,
+    });
+
+    const fetchMock = vi.fn().mockResolvedValueOnce({
+      ok: false,
+      statusText: "Bad Request",
+      json: async () => ({
+        errors: [{ message: "Issue not found" }],
+      }),
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const res = await app.request("/api/linear/issues/issue-123/transition", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({}),
+    });
+    expect(res.status).toBe(502);
+    const json = await res.json();
+    expect(json).toEqual({ error: "Issue not found" });
+
+    vi.unstubAllGlobals();
+  });
+});
+
+// ─── Linear projects ─────────────────────────────────────────────────────────
+
+describe("GET /api/linear/projects", () => {
+  it("returns 400 when linear key is not configured", async () => {
+    vi.mocked(settingsManager.getSettings).mockReturnValue({
+      anthropicApiKey: "",
+      anthropicModel: "claude-sonnet-4-6",
+      linearApiKey: "",
+      linearAutoTransition: false,
+      linearAutoTransitionStateId: "",
+      linearAutoTransitionStateName: "",
+    linearArchiveTransition: false,
+    linearArchiveTransitionStateId: "",
+    linearArchiveTransitionStateName: "",
+      linearOAuthClientId: "",
+      linearOAuthClientSecret: "",
+      linearOAuthWebhookSecret: "",
+      linearOAuthAccessToken: "",
+      linearOAuthRefreshToken: "",
+      editorTabEnabled: false,
+      aiValidationEnabled: false,
+      aiValidationAutoApprove: true,
+      aiValidationAutoDeny: false,
+      publicUrl: "",
+      updateChannel: "stable",
+      dockerAutoUpdate: false,
+      updatedAt: 0,
+    });
+    vi.mocked(resolveApiKey).mockReturnValue(null);
+
+    const res = await app.request("/api/linear/projects", { method: "GET" });
+    expect(res.status).toBe(400);
+    const json = await res.json();
+    expect(json).toEqual({ error: "No Linear connection configured" });
+  });
+
+  it("returns project list from Linear API", async () => {
+    vi.mocked(settingsManager.getSettings).mockReturnValue({
+      anthropicApiKey: "",
+      anthropicModel: "claude-sonnet-4-6",
+      linearApiKey: "lin_api_123",
+      linearAutoTransition: false,
+      linearAutoTransitionStateId: "",
+      linearAutoTransitionStateName: "",
+    linearArchiveTransition: false,
+    linearArchiveTransitionStateId: "",
+    linearArchiveTransitionStateName: "",
+      linearOAuthClientId: "",
+      linearOAuthClientSecret: "",
+      linearOAuthWebhookSecret: "",
+      linearOAuthAccessToken: "",
+      linearOAuthRefreshToken: "",
+      editorTabEnabled: false,
+      aiValidationEnabled: false,
+      aiValidationAutoApprove: true,
+      aiValidationAutoDeny: false,
+      publicUrl: "",
+      updateChannel: "stable",
+      dockerAutoUpdate: false,
+      updatedAt: 0,
+    });
+
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      statusText: "OK",
+      json: async () => ({
+        data: {
+          projects: {
+            nodes: [
+              { id: "p1", name: "My Feature", state: "started" },
+              { id: "p2", name: "Backend Rework", state: "planned" },
+            ],
+          },
+        },
+      }),
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const res = await app.request("/api/linear/projects", { method: "GET" });
+    expect(res.status).toBe(200);
+    const json = await res.json();
+    expect(json).toEqual({
+      projects: [
+        { id: "p1", name: "My Feature", state: "started" },
+        { id: "p2", name: "Backend Rework", state: "planned" },
+      ],
+    });
+    vi.unstubAllGlobals();
+  });
+});
+
+describe("GET /api/linear/project-issues", () => {
+  it("returns 400 when projectId is missing", async () => {
+    const res = await app.request("/api/linear/project-issues", { method: "GET" });
+    expect(res.status).toBe(400);
+    const json = await res.json();
+    expect(json).toEqual({ error: "projectId is required" });
+  });
+
+  it("returns 400 when linear key is not configured", async () => {
+    vi.mocked(settingsManager.getSettings).mockReturnValue({
+      anthropicApiKey: "",
+      anthropicModel: "claude-sonnet-4-6",
+      linearApiKey: "",
+      linearAutoTransition: false,
+      linearAutoTransitionStateId: "",
+      linearAutoTransitionStateName: "",
+    linearArchiveTransition: false,
+    linearArchiveTransitionStateId: "",
+    linearArchiveTransitionStateName: "",
+      linearOAuthClientId: "",
+      linearOAuthClientSecret: "",
+      linearOAuthWebhookSecret: "",
+      linearOAuthAccessToken: "",
+      linearOAuthRefreshToken: "",
+      editorTabEnabled: false,
+      aiValidationEnabled: false,
+      aiValidationAutoApprove: true,
+      aiValidationAutoDeny: false,
+      publicUrl: "",
+      updateChannel: "stable",
+      dockerAutoUpdate: false,
+      updatedAt: 0,
+    });
+    vi.mocked(resolveApiKey).mockReturnValue(null);
+
+    const res = await app.request("/api/linear/project-issues?projectId=p1", { method: "GET" });
+    expect(res.status).toBe(400);
+    const json = await res.json();
+    expect(json).toEqual({ error: "No Linear connection configured" });
+  });
+
+  it("returns recent non-done issues for a project", async () => {
+    vi.mocked(settingsManager.getSettings).mockReturnValue({
+      anthropicApiKey: "",
+      anthropicModel: "claude-sonnet-4-6",
+      linearApiKey: "lin_api_123",
+      linearAutoTransition: false,
+      linearAutoTransitionStateId: "",
+      linearAutoTransitionStateName: "",
+    linearArchiveTransition: false,
+    linearArchiveTransitionStateId: "",
+    linearArchiveTransitionStateName: "",
+      linearOAuthClientId: "",
+      linearOAuthClientSecret: "",
+      linearOAuthWebhookSecret: "",
+      linearOAuthAccessToken: "",
+      linearOAuthRefreshToken: "",
+      editorTabEnabled: false,
+      aiValidationEnabled: false,
+      aiValidationAutoApprove: true,
+      aiValidationAutoDeny: false,
+      publicUrl: "",
+      updateChannel: "stable",
+      dockerAutoUpdate: false,
+      updatedAt: 0,
+    });
+
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      statusText: "OK",
+      json: async () => ({
+        data: {
+          issues: {
+            nodes: [{
+              id: "issue-1",
+              identifier: "ENG-42",
+              title: "Implement dark mode",
+              description: "Add theme support",
+              url: "https://linear.app/acme/issue/ENG-42",
+              priorityLabel: "Medium",
+              state: { name: "In Progress", type: "started" },
+              team: { key: "ENG", name: "Engineering" },
+              assignee: { name: "Ada" },
+              updatedAt: "2026-02-19T10:00:00Z",
+            }],
+          },
+        },
+      }),
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const res = await app.request("/api/linear/project-issues?projectId=p1&limit=5", { method: "GET" });
+    expect(res.status).toBe(200);
+    const json = await res.json();
+    expect(json).toEqual({
+      issues: [{
+        id: "issue-1",
+        identifier: "ENG-42",
+        title: "Implement dark mode",
+        description: "Add theme support",
+        url: "https://linear.app/acme/issue/ENG-42",
+        priorityLabel: "Medium",
+        stateName: "In Progress",
+        stateType: "started",
+        teamName: "Engineering",
+        teamKey: "ENG",
+        assigneeName: "Ada",
+        updatedAt: "2026-02-19T10:00:00Z",
+      }],
+    });
+
+    // Verify the GraphQL query uses projectId variable and correct limit
+    const [, requestInit] = vi.mocked(fetchMock).mock.calls[0];
+    const requestBody = JSON.parse(String(requestInit?.body ?? "{}"));
+    expect(requestBody.variables).toEqual({ projectId: "p1", first: 5 });
+    vi.unstubAllGlobals();
+  });
+
+  it("orders project issues backlog-like first, then in-progress", async () => {
+    // UI issue lists should present queued/backlog work first, followed by started work.
+    vi.mocked(settingsManager.getSettings).mockReturnValue({
+      anthropicApiKey: "",
+      anthropicModel: "claude-sonnet-4-6",
+      linearApiKey: "lin_api_123",
+      linearAutoTransition: false,
+      linearAutoTransitionStateId: "",
+      linearAutoTransitionStateName: "",
+    linearArchiveTransition: false,
+    linearArchiveTransitionStateId: "",
+    linearArchiveTransitionStateName: "",
+      linearOAuthClientId: "",
+      linearOAuthClientSecret: "",
+      linearOAuthWebhookSecret: "",
+      linearOAuthAccessToken: "",
+      linearOAuthRefreshToken: "",
+      editorTabEnabled: false,
+      aiValidationEnabled: false,
+      aiValidationAutoApprove: true,
+      aiValidationAutoDeny: false,
+      publicUrl: "",
+      updateChannel: "stable",
+      dockerAutoUpdate: false,
+      updatedAt: 0,
+    });
+
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      statusText: "OK",
+      json: async () => ({
+        data: {
+          issues: {
+            nodes: [
+              {
+                id: "started-1",
+                identifier: "ENG-100",
+                title: "Ship API",
+                description: "",
+                url: "https://linear.app/acme/issue/ENG-100",
+                priorityLabel: null,
+                state: { name: "In Progress", type: "started" },
+                team: { key: "ENG", name: "Engineering" },
+                assignee: null,
+                updatedAt: "2026-02-19T10:00:00Z",
+              },
+              {
+                id: "backlog-1",
+                identifier: "ENG-101",
+                title: "Scope feature",
+                description: "",
+                url: "https://linear.app/acme/issue/ENG-101",
+                priorityLabel: null,
+                state: { name: "Backlog", type: "unstarted" },
+                team: { key: "ENG", name: "Engineering" },
+                assignee: null,
+                updatedAt: "2026-02-19T09:00:00Z",
+              },
+            ],
+          },
+        },
+      }),
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const res = await app.request("/api/linear/project-issues?projectId=p1", { method: "GET" });
+    expect(res.status).toBe(200);
+    const json = await res.json();
+    expect(json.issues.map((i: { identifier: string }) => i.identifier)).toEqual(["ENG-101", "ENG-100"]);
+    vi.unstubAllGlobals();
+  });
+});
+
+// ─── Linear project mappings ─────────────────────────────────────────────────
+
+describe("GET /api/linear/project-mappings", () => {
+  it("returns mapping for a specific repoRoot", async () => {
+    const mockMapping = {
+      repoRoot: "/home/user/project",
+      projectId: "p1",
+      projectName: "My Feature",
+      createdAt: 1000,
+      updatedAt: 1000,
+    };
+    vi.mocked(linearProjectManager.getMapping).mockReturnValue(mockMapping);
+
+    const res = await app.request(
+      "/api/linear/project-mappings?repoRoot=%2Fhome%2Fuser%2Fproject",
+      { method: "GET" },
+    );
+    expect(res.status).toBe(200);
+    const json = await res.json();
+    expect(json).toEqual({ mapping: mockMapping });
+    expect(linearProjectManager.getMapping).toHaveBeenCalledWith("/home/user/project");
+  });
+
+  it("returns null mapping when repoRoot has no mapping", async () => {
+    vi.mocked(linearProjectManager.getMapping).mockReturnValue(null);
+
+    const res = await app.request(
+      "/api/linear/project-mappings?repoRoot=%2Funknown",
+      { method: "GET" },
+    );
+    expect(res.status).toBe(200);
+    const json = await res.json();
+    expect(json).toEqual({ mapping: null });
+  });
+
+  it("returns all mappings when no repoRoot specified", async () => {
+    const mockMappings = [
+      { repoRoot: "/repo-a", projectId: "p1", projectName: "My Feature", createdAt: 1000, updatedAt: 1000 },
+      { repoRoot: "/repo-b", projectId: "p2", projectName: "Backend Rework", createdAt: 2000, updatedAt: 2000 },
+    ];
+    vi.mocked(linearProjectManager.listMappings).mockReturnValue(mockMappings);
+
+    const res = await app.request("/api/linear/project-mappings", { method: "GET" });
+    expect(res.status).toBe(200);
+    const json = await res.json();
+    expect(json).toEqual({ mappings: mockMappings });
+  });
+});
+
+describe("PUT /api/linear/project-mappings", () => {
+  it("returns 400 when required fields are missing", async () => {
+    const res = await app.request("/api/linear/project-mappings", {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ repoRoot: "/repo" }),
+    });
+    expect(res.status).toBe(400);
+    const json = await res.json();
+    expect(json).toEqual({ error: "repoRoot, projectId, and projectName are required" });
+  });
+
+  it("creates a mapping successfully", async () => {
+    const res = await app.request("/api/linear/project-mappings", {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        repoRoot: "/home/user/project",
+        projectId: "p1",
+        projectName: "My Feature",
+      }),
+    });
+    expect(res.status).toBe(200);
+    const json = await res.json();
+    expect(json.mapping).toBeDefined();
+    expect(json.mapping.repoRoot).toBe("/home/user/project");
+    expect(json.mapping.projectName).toBe("My Feature");
+    expect(linearProjectManager.upsertMapping).toHaveBeenCalledWith(
+      "/home/user/project",
+      { projectId: "p1", projectName: "My Feature" },
+    );
+  });
+});
+
+describe("DELETE /api/linear/project-mappings", () => {
+  it("returns 400 when repoRoot is missing", async () => {
+    const res = await app.request("/api/linear/project-mappings", {
+      method: "DELETE",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({}),
+    });
+    expect(res.status).toBe(400);
+    const json = await res.json();
+    expect(json).toEqual({ error: "repoRoot is required" });
+  });
+
+  it("returns 404 when mapping not found", async () => {
+    vi.mocked(linearProjectManager.removeMapping).mockReturnValue(false);
+
+    const res = await app.request("/api/linear/project-mappings", {
+      method: "DELETE",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ repoRoot: "/unknown" }),
+    });
+    expect(res.status).toBe(404);
+  });
+
+  it("removes mapping successfully", async () => {
+    vi.mocked(linearProjectManager.removeMapping).mockReturnValue(true);
+
+    const res = await app.request("/api/linear/project-mappings", {
+      method: "DELETE",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ repoRoot: "/home/user/project" }),
+    });
+    expect(res.status).toBe(200);
+    const json = await res.json();
+    expect(json).toEqual({ ok: true });
+    expect(linearProjectManager.removeMapping).toHaveBeenCalledWith("/home/user/project");
+  });
+});
 // ─── Git ─────────────────────────────────────────────────────────────────────
 
 describe("GET /api/git/repo-info", () => {
@@ -1221,6 +3114,8 @@ describe("PATCH /api/sessions/:id/name", () => {
     const json = await res.json();
     expect(json).toEqual({ ok: true, name: "Fix auth bug" });
     expect(sessionNames.setName).toHaveBeenCalledWith("s1", "Fix auth bug");
+    // Verify the name update is broadcast to connected browsers via WebSocket
+    expect(bridge.broadcastNameUpdate).toHaveBeenCalledWith("s1", "Fix auth bug");
   });
 
   it("trims whitespace from name", async () => {
@@ -1393,7 +3288,34 @@ describe("GET /api/fs/diff", () => {
     expect(json).toEqual({ error: "path required" });
   });
 
-  it("returns unified diff for a file", async () => {
+  it("diffs against HEAD by default when no base param is provided", async () => {
+    // Validates that /api/fs/diff defaults to HEAD (uncommitted changes only).
+    const diffOutput = `diff --git a/file.ts b/file.ts
+--- a/file.ts
++++ b/file.ts
+@@ -1,3 +1,3 @@
+ line1
+-old line
++new line
+ line3`;
+    vi.mocked(execSync)
+      .mockReturnValueOnce("/repo\n") // rev-parse --show-toplevel
+      .mockReturnValueOnce("file.ts\n") // ls-files --full-name
+      .mockReturnValueOnce(diffOutput); // git diff HEAD
+
+    const res = await app.request("/api/fs/diff?path=/repo/file.ts", { method: "GET" });
+
+    expect(res.status).toBe(200);
+    const json = await res.json();
+    expect(json.diff).toBe(diffOutput);
+    expect(json.path).toContain("file.ts");
+    expect(vi.mocked(execSync)).toHaveBeenCalledWith(
+      expect.stringContaining("git diff HEAD"),
+      expect.objectContaining({ encoding: "utf-8", timeout: 5000 }),
+    );
+  });
+
+  it("diffs against default branch when base=default-branch", async () => {
     // Validates that /api/fs/diff uses the repository default branch as base (origin/main here).
     const diffOutput = `diff --git a/file.ts b/file.ts
 --- a/file.ts
@@ -1409,7 +3331,7 @@ describe("GET /api/fs/diff", () => {
       .mockReturnValueOnce("refs/remotes/origin/main\n") // symbolic-ref refs/remotes/origin/HEAD
       .mockReturnValueOnce(diffOutput); // git diff origin/main
 
-    const res = await app.request("/api/fs/diff?path=/repo/file.ts", { method: "GET" });
+    const res = await app.request("/api/fs/diff?path=/repo/file.ts&base=default-branch", { method: "GET" });
 
     expect(res.status).toBe(200);
     const json = await res.json();
@@ -1443,7 +3365,7 @@ index 0000000..e69de29
         throw err;
       }); // git diff --no-index
 
-    const res = await app.request("/api/fs/diff?path=/repo/new.txt", { method: "GET" });
+    const res = await app.request("/api/fs/diff?path=/repo/new.txt&base=default-branch", { method: "GET" });
     const json = await res.json();
 
     expect(res.status).toBe(200);
@@ -1473,7 +3395,7 @@ index 0000000..e69de29
       .mockReturnValueOnce("main\n") // branch --list fallback
       .mockReturnValueOnce(diffOutput); // git diff main
 
-    const res = await app.request("/api/fs/diff?path=/repo/file.ts", { method: "GET" });
+    const res = await app.request("/api/fs/diff?path=/repo/file.ts&base=default-branch", { method: "GET" });
 
     expect(res.status).toBe(200);
     const json = await res.json();
@@ -1601,7 +3523,10 @@ describe("GET /api/backends/:id/models", () => {
 // ─── Session creation with backend type ──────────────────────────────────────
 
 describe("POST /api/sessions/create with backend", () => {
-  it("passes backendType codex to launcher", async () => {
+  // Route delegates to orchestrator.createSession — backend resolution is tested
+  // in session-orchestrator.test.ts. Route tests verify the body is passed through.
+
+  it("passes backend codex through to orchestrator", async () => {
     const res = await app.request("/api/sessions/create", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -1609,12 +3534,12 @@ describe("POST /api/sessions/create with backend", () => {
     });
 
     expect(res.status).toBe(200);
-    expect(launcher.launch).toHaveBeenCalledWith(
-      expect.objectContaining({ model: "gpt-5.2-codex", backendType: "codex" }),
+    expect(orchestrator.createSession).toHaveBeenCalledWith(
+      expect.objectContaining({ model: "gpt-5.2-codex", backend: "codex" }),
     );
   });
 
-  it("defaults to claude backend when not specified", async () => {
+  it("passes request without backend to orchestrator (defaults handled by orchestrator)", async () => {
     const res = await app.request("/api/sessions/create", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -1622,8 +3547,8 @@ describe("POST /api/sessions/create with backend", () => {
     });
 
     expect(res.status).toBe(200);
-    expect(launcher.launch).toHaveBeenCalledWith(
-      expect.objectContaining({ backendType: "claude" }),
+    expect(orchestrator.createSession).toHaveBeenCalledWith(
+      expect.objectContaining({ cwd: "/test" }),
     );
   });
 });
@@ -1654,8 +3579,8 @@ describe("GET /api/sessions/:id/usage-limits", () => {
   it("returns mapped Codex rate limits for a codex session", async () => {
     bridge.getSession.mockReturnValue({ backendType: "codex" });
     bridge.getCodexRateLimits.mockReturnValue({
-      primary: { usedPercent: 25, windowDurationMins: 300, resetsAt: 1730947200 },
-      secondary: { usedPercent: 10, windowDurationMins: 10080, resetsAt: 1731552000 },
+      primary: { usedPercent: 25, windowDurationMins: 300, resetsAt: 1730947200 * 1000 },
+      secondary: { usedPercent: 10, windowDurationMins: 10080, resetsAt: 1731552000 * 1000 },
     });
 
     const res = await app.request("/api/sessions/s1/usage-limits", { method: "GET" });
@@ -1683,6 +3608,28 @@ describe("GET /api/sessions/:id/usage-limits", () => {
     expect(res.status).toBe(200);
     const json = await res.json();
     expect(json).toEqual({ five_hour: null, seven_day: null, extra_usage: null });
+  });
+
+  it("maps Codex rate limits when bridge still returns second-based timestamps", async () => {
+    bridge.getSession.mockReturnValue({ backendType: "codex" });
+    bridge.getCodexRateLimits.mockReturnValue({
+      // Backward-compat coverage for pre-normalized payloads from bridge/session state.
+      primary: { usedPercent: 25, windowDurationMins: 300, resetsAt: 1730947200 },
+      secondary: { usedPercent: 10, windowDurationMins: 10080, resetsAt: 1731552000 },
+    });
+
+    const res = await app.request("/api/sessions/s1/usage-limits", { method: "GET" });
+
+    expect(res.status).toBe(200);
+    const json = await res.json();
+    expect(json.five_hour).toEqual({
+      utilization: 25,
+      resets_at: new Date(1730947200 * 1000).toISOString(),
+    });
+    expect(json.seven_day).toEqual({
+      utilization: 10,
+      resets_at: new Date(1731552000 * 1000).toISOString(),
+    });
   });
 
   it("handles codex rate limits with null secondary", async () => {
@@ -1739,8 +3686,23 @@ async function parseSSE(res: Response): Promise<{ event: string; data: string }[
 }
 
 describe("POST /api/sessions/create-stream", () => {
-  it("emits progress events and done event for a basic session", async () => {
-    // Simple session creation with no containers or worktrees
+  // Route delegates to orchestrator.createSessionStreaming — detailed orchestration logic
+  // (git ops, container creation, image pulling, etc.) is tested in session-orchestrator.test.ts.
+  // Route tests verify SSE transport: progress events are emitted, done/error events are correct.
+
+  it("emits progress events from orchestrator and done event on success", async () => {
+    // Mock createSessionStreaming to call the progress callback with some events
+    orchestrator.createSessionStreaming.mockImplementation(async (_body: any, onProgress: any) => {
+      await onProgress("resolving_env", "Resolving environment...", "in_progress");
+      await onProgress("resolving_env", "Resolving environment...", "done");
+      await onProgress("launching_cli", "Launching Claude Code...", "in_progress");
+      await onProgress("launching_cli", "Launching Claude Code...", "done");
+      return {
+        ok: true,
+        session: { sessionId: "session-1", state: "starting", cwd: "/test", createdAt: Date.now(), backendType: "claude" },
+      };
+    });
+
     const res = await app.request("/api/sessions/create-stream", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -1752,16 +3714,16 @@ describe("POST /api/sessions/create-stream", () => {
 
     const events = await parseSSE(res);
 
-    // Should have resolving_env (in_progress + done) and launching_cli (in_progress + done)
+    // Should have progress events
     const progressEvents = events.filter((e) => e.event === "progress");
-    expect(progressEvents.length).toBeGreaterThanOrEqual(4);
+    expect(progressEvents.length).toBe(4);
 
     // First progress should be resolving_env in_progress
     const first = JSON.parse(progressEvents[0].data);
     expect(first.step).toBe("resolving_env");
     expect(first.status).toBe("in_progress");
 
-    // Last event should be "done" with sessionId
+    // Done event should be emitted with session info
     const doneEvent = events.find((e) => e.event === "done");
     expect(doneEvent).toBeDefined();
     const doneData = JSON.parse(doneEvent!.data);
@@ -1769,86 +3731,13 @@ describe("POST /api/sessions/create-stream", () => {
     expect(doneData.cwd).toBe("/test");
   });
 
-  it("emits git progress events when branch is specified", async () => {
-    // When branch is specified without useWorktree, should emit fetch/checkout/pull events
-    vi.mocked(gitUtils.getRepoInfo).mockReturnValueOnce({
-      repoRoot: "/test",
-      currentBranch: "main",
-      defaultBranch: "main",
-    } as any);
-
-    const res = await app.request("/api/sessions/create-stream", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ cwd: "/test", branch: "feat/new" }),
+  it("emits error event when orchestrator returns failure", async () => {
+    orchestrator.createSessionStreaming.mockResolvedValue({
+      ok: false,
+      error: "Invalid backend: invalid",
+      status: 400,
     });
 
-    expect(res.status).toBe(200);
-    const events = await parseSSE(res);
-    const steps = events
-      .filter((e) => e.event === "progress")
-      .map((e) => JSON.parse(e.data).step);
-
-    // Should include git operations
-    expect(steps).toContain("fetching_git");
-    expect(steps).toContain("checkout_branch");
-    expect(steps).toContain("pulling_git");
-    expect(steps).toContain("launching_cli");
-  });
-
-  it("emits worktree progress events when useWorktree is set", async () => {
-    vi.mocked(gitUtils.getRepoInfo).mockReturnValueOnce({
-      repoRoot: "/test",
-      currentBranch: "main",
-      defaultBranch: "main",
-    } as any);
-    vi.mocked(gitUtils.ensureWorktree).mockReturnValueOnce({
-      worktreePath: "/test-wt-123",
-      actualBranch: "feat/auth",
-      created: true,
-    } as any);
-
-    const res = await app.request("/api/sessions/create-stream", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ cwd: "/test", branch: "feat/auth", useWorktree: true }),
-    });
-
-    expect(res.status).toBe(200);
-    const events = await parseSSE(res);
-    const steps = events
-      .filter((e) => e.event === "progress")
-      .map((e) => JSON.parse(e.data).step);
-
-    expect(steps).toContain("creating_worktree");
-    expect(steps).toContain("launching_cli");
-    // Should NOT have fetch/checkout/pull since it uses worktree
-    expect(steps).not.toContain("fetching_git");
-  });
-
-  it("emits error event for invalid branch name", async () => {
-    const res = await app.request("/api/sessions/create-stream", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ cwd: "/test", branch: "bad branch name!" }),
-    });
-
-    expect(res.status).toBe(200);
-    const events = await parseSSE(res);
-    const errorEvent = events.find((e) => e.event === "error");
-    expect(errorEvent).toBeDefined();
-    const errorData = JSON.parse(errorEvent!.data);
-    expect(errorData.error).toContain("Invalid branch name");
-
-    // No done event should be emitted
-    const doneEvent = events.find((e) => e.event === "done");
-    expect(doneEvent).toBeUndefined();
-
-    // CLI should NOT be launched
-    expect(launcher.launch).not.toHaveBeenCalled();
-  });
-
-  it("emits error event for invalid backend", async () => {
     const res = await app.request("/api/sessions/create-stream", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -1862,238 +3751,810 @@ describe("POST /api/sessions/create-stream", () => {
     expect(JSON.parse(errorEvent!.data).error).toContain("Invalid backend");
   });
 
-  it("emits container progress events for containerized session", async () => {
-    // Env with Docker image — image already exists
-    vi.mocked(envManager.getEnv).mockReturnValue({
-      name: "Docker",
-      slug: "docker",
-      variables: { CLAUDE_CODE_OAUTH_TOKEN: "token" },
-      baseImage: "the-companion:latest",
-      createdAt: 1000,
-      updatedAt: 1000,
-    } as any);
-    vi.mocked(envManager.getEffectiveImage).mockReturnValue("the-companion:latest");
-    vi.spyOn(containerManager, "imageExists").mockReturnValueOnce(true);
-    vi.spyOn(containerManager, "createContainer").mockReturnValueOnce({
-      containerId: "cid-stream",
-      name: "companion-stream",
-      image: "the-companion:latest",
-      portMappings: [],
-      hostCwd: "/test",
-      containerCwd: "/workspace",
-      state: "running",
-    });
-    vi.spyOn(containerManager, "retrack").mockImplementation(() => {});
+  it("passes request body through to orchestrator", async () => {
+    const body = {
+      cwd: "/test",
+      backend: "codex",
+      branch: "feat/new",
+      useWorktree: true,
+      sandboxEnabled: true,
+      sandboxSlug: "docker",
+    };
 
     const res = await app.request("/api/sessions/create-stream", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ cwd: "/test", envSlug: "docker" }),
+      body: JSON.stringify(body),
     });
 
     expect(res.status).toBe(200);
-    const events = await parseSSE(res);
-    const steps = events
-      .filter((e) => e.event === "progress")
-      .map((e) => JSON.parse(e.data).step);
-
-    expect(steps).toContain("creating_container");
-    expect(steps).toContain("launching_cli");
-
-    // Done event should include sessionId
-    const doneEvent = events.find((e) => e.event === "done");
-    expect(doneEvent).toBeDefined();
-    expect(JSON.parse(doneEvent!.data).sessionId).toBe("session-1");
-  });
-
-  it("tries pull then falls back to build when image is missing", async () => {
-    // Env with missing default Docker image — pull succeeds
-    vi.mocked(envManager.getEnv).mockReturnValue({
-      name: "Docker",
-      slug: "docker",
-      variables: { ANTHROPIC_API_KEY: "key" },
-      baseImage: "the-companion:latest",
-      createdAt: 1000,
-      updatedAt: 1000,
-    } as any);
-    vi.mocked(envManager.getEffectiveImage).mockReturnValue("the-companion:latest");
-    // the-companion:latest is not found locally
-    vi.spyOn(containerManager, "imageExists").mockReturnValueOnce(false);
-    const pullSpy = vi.spyOn(containerManager, "pullImage").mockResolvedValueOnce(true);
-    vi.spyOn(containerManager, "createContainer").mockReturnValueOnce({
-      containerId: "cid-pulled",
-      name: "companion-pulled",
-      image: "the-companion:latest",
-      portMappings: [],
-      hostCwd: "/test",
-      containerCwd: "/workspace",
-      state: "running",
-    });
-    vi.spyOn(containerManager, "retrack").mockImplementation(() => {});
-
-    const res = await app.request("/api/sessions/create-stream", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ cwd: "/test", envSlug: "docker" }),
-    });
-
-    expect(res.status).toBe(200);
-    const events = await parseSSE(res);
-    const steps = events
-      .filter((e) => e.event === "progress")
-      .map((e) => JSON.parse(e.data).step);
-
-    // Should have pulling_image step
-    expect(steps).toContain("pulling_image");
-    expect(pullSpy).toHaveBeenCalledWith(
-      expect.stringContaining("docker.io"),
-      "the-companion:latest",
-    );
-
-    // Should NOT have building_image (pull succeeded)
-    expect(steps).not.toContain("building_image");
-  });
-
-  it("falls back to build when pull fails", async () => {
-    vi.mocked(envManager.getEnv).mockReturnValue({
-      name: "Docker",
-      slug: "docker",
-      variables: { ANTHROPIC_API_KEY: "key" },
-      baseImage: "the-companion:latest",
-      createdAt: 1000,
-      updatedAt: 1000,
-    } as any);
-    vi.mocked(envManager.getEffectiveImage).mockReturnValue("the-companion:latest");
-    // the-companion:latest is not found locally
-    vi.spyOn(containerManager, "imageExists").mockReturnValueOnce(false);
-    vi.spyOn(containerManager, "pullImage").mockResolvedValueOnce(false);
-    vi.mocked(existsSync).mockReturnValueOnce(true); // Dockerfile exists
-    const buildSpy = vi.spyOn(containerManager, "buildImage").mockReturnValue("ok");
-    vi.spyOn(containerManager, "createContainer").mockReturnValueOnce({
-      containerId: "cid-built",
-      name: "companion-built",
-      image: "the-companion:latest",
-      portMappings: [],
-      hostCwd: "/test",
-      containerCwd: "/workspace",
-      state: "running",
-    });
-    vi.spyOn(containerManager, "retrack").mockImplementation(() => {});
-
-    const res = await app.request("/api/sessions/create-stream", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ cwd: "/test", envSlug: "docker" }),
-    });
-
-    expect(res.status).toBe(200);
-    const events = await parseSSE(res);
-    const steps = events
-      .filter((e) => e.event === "progress")
-      .map((e) => JSON.parse(e.data).step);
-
-    // Should have both pulling_image and building_image steps
-    expect(steps).toContain("pulling_image");
-    expect(steps).toContain("building_image");
-    expect(buildSpy).toHaveBeenCalledWith(
-      expect.stringContaining("Dockerfile.the-companion"),
-      "the-companion:latest",
+    expect(orchestrator.createSessionStreaming).toHaveBeenCalledWith(
+      body,
+      expect.any(Function),
     );
   });
 
-  it("emits init script progress events when env has initScript", async () => {
-    vi.mocked(envManager.getEnv).mockReturnValue({
-      name: "WithInit",
-      slug: "with-init",
-      variables: { CLAUDE_CODE_OAUTH_TOKEN: "token" },
-      baseImage: "the-companion:latest",
-      initScript: "npm install",
-      createdAt: 1000,
-      updatedAt: 1000,
-    } as any);
-    vi.mocked(envManager.getEffectiveImage).mockReturnValue("the-companion:latest");
-    vi.spyOn(containerManager, "imageExists").mockReturnValueOnce(true);
-    vi.spyOn(containerManager, "createContainer").mockReturnValueOnce({
-      containerId: "cid-init-stream",
-      name: "companion-init-stream",
-      image: "the-companion:latest",
-      portMappings: [],
-      hostCwd: "/test",
-      containerCwd: "/workspace",
-      state: "running",
+  it("does not emit done event when orchestrator returns error", async () => {
+    orchestrator.createSessionStreaming.mockImplementation(async (_body: any, onProgress: any) => {
+      await onProgress("resolving_env", "Resolving environment...", "in_progress");
+      return { ok: false, error: "CLI binary not found", status: 500 };
     });
-    vi.spyOn(containerManager, "retrack").mockImplementation(() => {});
-    vi.spyOn(containerManager, "execInContainerAsync")
-      .mockResolvedValueOnce({ exitCode: 0, output: "ok" });
 
     const res = await app.request("/api/sessions/create-stream", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ cwd: "/test", envSlug: "with-init" }),
+      body: JSON.stringify({ cwd: "/test" }),
     });
 
-    expect(res.status).toBe(200);
     const events = await parseSSE(res);
-    const steps = events
-      .filter((e) => e.event === "progress")
-      .map((e) => JSON.parse(e.data).step);
-
-    expect(steps).toContain("running_init_script");
-    expect(steps).toContain("launching_cli");
-
-    // Done event should be present
     const doneEvent = events.find((e) => e.event === "done");
-    expect(doneEvent).toBeDefined();
-  });
-
-  it("emits error and cleans up when init script fails", async () => {
-    vi.mocked(envManager.getEnv).mockReturnValue({
-      name: "FailInit",
-      slug: "fail-init",
-      variables: { CLAUDE_CODE_OAUTH_TOKEN: "token" },
-      baseImage: "the-companion:latest",
-      initScript: "exit 1",
-      createdAt: 1000,
-      updatedAt: 1000,
-    } as any);
-    vi.mocked(envManager.getEffectiveImage).mockReturnValue("the-companion:latest");
-    vi.spyOn(containerManager, "imageExists").mockReturnValueOnce(true);
-    vi.spyOn(containerManager, "createContainer").mockReturnValueOnce({
-      containerId: "cid-fail-stream",
-      name: "companion-fail-stream",
-      image: "the-companion:latest",
-      portMappings: [],
-      hostCwd: "/test",
-      containerCwd: "/workspace",
-      state: "running",
-    });
-    const removeSpy = vi.spyOn(containerManager, "removeContainer").mockImplementation(() => {});
-    vi.spyOn(containerManager, "execInContainerAsync")
-      .mockResolvedValueOnce({ exitCode: 1, output: "npm ERR! missing script" });
-
-    const res = await app.request("/api/sessions/create-stream", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ cwd: "/test", envSlug: "fail-init" }),
-    });
-
-    expect(res.status).toBe(200);
-    const events = await parseSSE(res);
-
-    // Should have an error event for init script failure
+    expect(doneEvent).toBeUndefined();
     const errorEvent = events.find((e) => e.event === "error");
     expect(errorEvent).toBeDefined();
-    const errorData = JSON.parse(errorEvent!.data);
-    expect(errorData.error).toContain("Init script failed");
-    expect(errorData.step).toBe("running_init_script");
+  });
+});
 
-    // Container should be cleaned up
-    expect(removeSpy).toHaveBeenCalled();
+// ---------------------------------------------------------------------------
+// Auth endpoints
+// ---------------------------------------------------------------------------
 
-    // No done event
-    expect(events.find((e) => e.event === "done")).toBeUndefined();
+describe("POST /api/auth/verify", () => {
+  it("returns ok:true for valid token", async () => {
+    // verifyToken is mocked to return true, so any token should succeed
+    const res = await app.request("/api/auth/verify", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ token: "test-token-for-routes" }),
+    });
+    expect(res.status).toBe(200);
+    const data = await res.json();
+    expect(data.ok).toBe(true);
+  });
 
-    // CLI should NOT be launched
-    expect(launcher.launch).not.toHaveBeenCalled();
+  it("returns 401 for invalid token", async () => {
+    // Temporarily override verifyToken to reject
+    const { verifyToken } = await import("./auth-manager.js");
+    (verifyToken as ReturnType<typeof vi.fn>).mockReturnValueOnce(false);
+
+    const res = await app.request("/api/auth/verify", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ token: "wrong" }),
+    });
+    expect(res.status).toBe(401);
+    const data = await res.json();
+    expect(data.error).toContain("Invalid token");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Container status / images endpoints
+// ---------------------------------------------------------------------------
+
+describe("GET /api/containers/status", () => {
+  it("returns docker availability and version", async () => {
+    // containerManager is already imported and its methods can be spied on
+    const checkSpy = vi.spyOn(containerManager, "checkDocker").mockReturnValue(true);
+    const versionSpy = vi.spyOn(containerManager, "getDockerVersion").mockReturnValue("24.0.7");
+
+    const res = await app.request("/api/containers/status");
+    expect(res.status).toBe(200);
+    const data = await res.json();
+    expect(data.available).toBe(true);
+    expect(data.version).toBe("24.0.7");
+
+    checkSpy.mockRestore();
+    versionSpy.mockRestore();
+  });
+
+  it("returns null version when docker is unavailable", async () => {
+    const checkSpy = vi.spyOn(containerManager, "checkDocker").mockReturnValue(false);
+
+    const res = await app.request("/api/containers/status");
+    expect(res.status).toBe(200);
+    const data = await res.json();
+    expect(data.available).toBe(false);
+    expect(data.version).toBeNull();
+
+    checkSpy.mockRestore();
+  });
+});
+
+describe("GET /api/containers/images", () => {
+  it("returns list of available images", async () => {
+    const spy = vi.spyOn(containerManager, "listImages").mockReturnValue(["node:22", "ubuntu:latest"]);
+
+    const res = await app.request("/api/containers/images");
+    expect(res.status).toBe(200);
+    const data = await res.json();
+    expect(data).toEqual(["node:22", "ubuntu:latest"]);
+
+    spy.mockRestore();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Recording management endpoints (recorder=undefined by default)
+// ---------------------------------------------------------------------------
+
+describe("Recording endpoints (no recorder)", () => {
+  it("POST /api/sessions/:id/recording/start returns 501 when recorder is not available", async () => {
+    // Default test setup doesn't pass a recorder to createRoutes
+    const res = await app.request("/api/sessions/sess-1/recording/start", { method: "POST" });
+    expect(res.status).toBe(501);
+    const data = await res.json();
+    expect(data.error).toContain("Recording not available");
+  });
+
+  it("POST /api/sessions/:id/recording/stop returns 501 when recorder is not available", async () => {
+    const res = await app.request("/api/sessions/sess-1/recording/stop", { method: "POST" });
+    expect(res.status).toBe(501);
+    const data = await res.json();
+    expect(data.error).toContain("Recording not available");
+  });
+
+  it("GET /api/sessions/:id/recording/status returns unavailable when no recorder", async () => {
+    const res = await app.request("/api/sessions/sess-1/recording/status");
+    expect(res.status).toBe(200);
+    const data = await res.json();
+    expect(data.recording).toBe(false);
+    expect(data.available).toBe(false);
+  });
+
+  it("GET /api/recordings returns empty list when no recorder", async () => {
+    const res = await app.request("/api/recordings");
+    expect(res.status).toBe(200);
+    const data = await res.json();
+    expect(data.recordings).toEqual([]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Process kill endpoints
+// ---------------------------------------------------------------------------
+
+describe("POST /api/sessions/:id/processes/:taskId/kill", () => {
+  it("returns 400 for invalid task ID format", async () => {
+    // Task IDs must be hex strings
+    launcher.getSession.mockReturnValue({ pid: 1234 });
+    const res = await app.request("/api/sessions/sess-1/processes/not-hex!/kill", {
+      method: "POST",
+    });
+    expect(res.status).toBe(400);
+    const data = await res.json();
+    expect(data.error).toContain("Invalid task ID");
+  });
+
+  it("returns 404 when session does not exist", async () => {
+    launcher.getSession.mockReturnValue(undefined);
+    const res = await app.request("/api/sessions/nonexistent/processes/abcdef/kill", {
+      method: "POST",
+    });
+    expect(res.status).toBe(404);
+  });
+
+  it("returns 503 when session PID is unknown", async () => {
+    launcher.getSession.mockReturnValue({ pid: null });
+    const res = await app.request("/api/sessions/sess-1/processes/abcdef/kill", {
+      method: "POST",
+    });
+    expect(res.status).toBe(503);
+  });
+
+  it("kills process in container when session has containerId", async () => {
+    launcher.getSession.mockReturnValue({ pid: 1234, containerId: "cid123" });
+    const execSpy = vi.spyOn(containerManager, "execInContainer").mockReturnValue("");
+
+    const res = await app.request("/api/sessions/sess-1/processes/abcdef/kill", {
+      method: "POST",
+    });
+    expect(res.status).toBe(200);
+    const data = await res.json();
+    expect(data.ok).toBe(true);
+    expect(execSpy).toHaveBeenCalled();
+
+    execSpy.mockRestore();
+  });
+
+  it("kills process on host when session has no container", async () => {
+    launcher.getSession.mockReturnValue({ pid: 1234 });
+    // execFileSync is mocked at module level — the endpoint uses dynamic import
+    const res = await app.request("/api/sessions/sess-1/processes/abcdef/kill", {
+      method: "POST",
+    });
+    expect(res.status).toBe(200);
+    const data = await res.json();
+    expect(data.ok).toBe(true);
+  });
+});
+
+describe("POST /api/sessions/:id/processes/kill-all", () => {
+  it("returns 404 when session does not exist", async () => {
+    launcher.getSession.mockReturnValue(undefined);
+    const res = await app.request("/api/sessions/nonexistent/processes/kill-all", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ taskIds: ["abc123"] }),
+    });
+    expect(res.status).toBe(404);
+  });
+
+  it("rejects invalid task IDs and processes valid ones", async () => {
+    launcher.getSession.mockReturnValue({ pid: 1234 });
+    const res = await app.request("/api/sessions/sess-1/processes/kill-all", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ taskIds: ["abc123", "not-valid!"] }),
+    });
+    expect(res.status).toBe(200);
+    const data = await res.json();
+    expect(data.ok).toBe(true);
+    expect(data.results).toHaveLength(2);
+    // First one should succeed, second should fail validation
+    expect(data.results[0].ok).toBe(true);
+    expect(data.results[1].ok).toBe(false);
+    expect(data.results[1].error).toContain("Invalid task ID");
+  });
+
+  it("kills processes in container when session has containerId", async () => {
+    launcher.getSession.mockReturnValue({ pid: 1234, containerId: "cid123" });
+    const execSpy = vi.spyOn(containerManager, "execInContainer").mockReturnValue("");
+
+    const res = await app.request("/api/sessions/sess-1/processes/kill-all", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ taskIds: ["abc123"] }),
+    });
+    expect(res.status).toBe(200);
+    const data = await res.json();
+    expect(data.results[0].ok).toBe(true);
+    expect(execSpy).toHaveBeenCalled();
+
+    execSpy.mockRestore();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// System process kill endpoint
+// ---------------------------------------------------------------------------
+
+describe("POST /api/sessions/:id/processes/system/:pid/kill", () => {
+  it("returns 400 for invalid PID", async () => {
+    const res = await app.request("/api/sessions/sess-1/processes/system/notanumber/kill", {
+      method: "POST",
+    });
+    expect(res.status).toBe(400);
+    const data = await res.json();
+    expect(data.error).toContain("Invalid PID");
+  });
+
+  it("returns 404 when session does not exist", async () => {
+    launcher.getSession.mockReturnValue(undefined);
+    const res = await app.request("/api/sessions/sess-1/processes/system/9999/kill", {
+      method: "POST",
+    });
+    expect(res.status).toBe(404);
+  });
+
+  it("refuses to kill the companion server process", async () => {
+    launcher.getSession.mockReturnValue({ pid: 1234 });
+    const res = await app.request(`/api/sessions/sess-1/processes/system/${process.pid}/kill`, {
+      method: "POST",
+    });
+    expect(res.status).toBe(403);
+    const data = await res.json();
+    expect(data.error).toContain("Cannot kill the Companion server");
+  });
+
+  it("refuses to kill the session's own CLI process", async () => {
+    launcher.getSession.mockReturnValue({ pid: 5678 });
+    const res = await app.request("/api/sessions/sess-1/processes/system/5678/kill", {
+      method: "POST",
+    });
+    expect(res.status).toBe(403);
+    const data = await res.json();
+    expect(data.error).toContain("Use the session kill endpoint");
+  });
+
+  it("kills process in container when session has containerId", async () => {
+    launcher.getSession.mockReturnValue({ pid: 1234, containerId: "cid123" });
+    const execSpy = vi.spyOn(containerManager, "execInContainer").mockReturnValue("");
+
+    const res = await app.request("/api/sessions/sess-1/processes/system/9999/kill", {
+      method: "POST",
+    });
+    expect(res.status).toBe(200);
+    const data = await res.json();
+    expect(data.ok).toBe(true);
+    expect(execSpy).toHaveBeenCalledWith(
+      "cid123",
+      ["kill", "-TERM", "9999"],
+      5_000,
+    );
+
+    execSpy.mockRestore();
+  });
+
+  it("kills process on host when session has no container", async () => {
+    launcher.getSession.mockReturnValue({ pid: 1234 });
+    const killSpy = vi.spyOn(process, "kill").mockImplementation(() => true);
+
+    const res = await app.request("/api/sessions/sess-1/processes/system/9999/kill", {
+      method: "POST",
+    });
+    expect(res.status).toBe(200);
+    const data = await res.json();
+    expect(data.ok).toBe(true);
+
+    killSpy.mockRestore();
+  });
+});
+
+// ── Browser preview endpoints ─────────────────────────────────────────────────
+
+describe("POST /api/sessions/:id/browser/start", () => {
+  it("returns host mode for non-container sessions", async () => {
+    launcher.getSession.mockReturnValue({
+      sessionId: "s1",
+      state: "running",
+      cwd: "/repo",
+    });
+
+    const res = await app.request("/api/sessions/s1/browser/start", { method: "POST" });
+
+    expect(res.status).toBe(200);
+    const json = await res.json();
+    expect(json).toMatchObject({
+      available: true,
+      mode: "host",
+    });
+  });
+
+  it("returns unavailable when container is missing", async () => {
+    launcher.getSession.mockReturnValue({
+      sessionId: "s1",
+      state: "running",
+      cwd: "/repo",
+      containerId: "cid-1",
+    });
+    vi.spyOn(containerManager, "getContainer").mockReturnValue(undefined);
+
+    const res = await app.request("/api/sessions/s1/browser/start", { method: "POST" });
+
+    expect(res.status).toBe(200);
+    const json = await res.json();
+    expect(json).toMatchObject({
+      available: false,
+      mode: "container",
+    });
+    expect(json.message).toContain("Container not found");
+  });
+
+  it("returns unavailable when Xvfb binary is missing", async () => {
+    launcher.getSession.mockReturnValue({
+      sessionId: "s1",
+      state: "running",
+      cwd: "/repo",
+      containerId: "cid-1",
+    });
+    vi.spyOn(containerManager, "getContainer").mockReturnValue({
+      containerId: "cid-1",
+      name: "companion-s1",
+      image: "the-companion:latest",
+      portMappings: [{ containerPort: 6080, hostPort: 49200 }],
+      hostCwd: "/repo",
+      containerCwd: "/workspace",
+      state: "running",
+    });
+    vi.spyOn(containerManager, "isContainerAlive").mockReturnValue("running");
+    // Xvfb not found, websockify found
+    vi.spyOn(containerManager, "hasBinaryInContainer").mockImplementation(
+      (_cid: string, bin: string) => bin !== "Xvfb",
+    );
+
+    const res = await app.request("/api/sessions/s1/browser/start", { method: "POST" });
+
+    expect(res.status).toBe(200);
+    const json = await res.json();
+    expect(json).toMatchObject({
+      available: false,
+      mode: "container",
+    });
+    expect(json.message).toContain("Xvfb and noVNC");
+  });
+
+  it("starts display stack and returns proxied URL for container session", async () => {
+    launcher.getSession.mockReturnValue({
+      sessionId: "s1",
+      state: "running",
+      cwd: "/repo",
+      containerId: "cid-1",
+    });
+    vi.spyOn(containerManager, "getContainer").mockReturnValue({
+      containerId: "cid-1",
+      name: "companion-s1",
+      image: "the-companion:latest",
+      portMappings: [{ containerPort: 6080, hostPort: 49200 }],
+      hostCwd: "/repo",
+      containerCwd: "/workspace",
+      state: "running",
+    });
+    vi.spyOn(containerManager, "hasBinaryInContainer").mockReturnValue(true);
+    vi.spyOn(containerManager, "isContainerAlive").mockReturnValue("running");
+    const execSpy = vi.spyOn(containerManager, "execInContainerAsync").mockResolvedValue({ exitCode: 0, output: "" });
+    const fetchSpy = vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response("ok", { status: 200 }));
+
+    const res = await app.request("/api/sessions/s1/browser/start", { method: "POST" });
+
+    expect(res.status).toBe(200);
+    const json = await res.json();
+    expect(json).toMatchObject({
+      available: true,
+      mode: "container",
+    });
+    // URL should be a proxied path through the companion server
+    expect(json.url).toContain("/api/sessions/s1/browser/proxy/vnc.html");
+    expect(json.url).toContain("autoconnect=true");
+    expect(json.url).toContain("path=ws/novnc/s1");
+    // Should have called execInContainerAsync for the display stack and Chrome
+    expect(execSpy).toHaveBeenCalledTimes(2);
+    fetchSpy.mockRestore();
+  });
+
+  it("returns unavailable when noVNC polling times out", { timeout: 25_000 }, async () => {
+    launcher.getSession.mockReturnValue({
+      sessionId: "s1",
+      state: "running",
+      cwd: "/repo",
+      containerId: "cid-1",
+    });
+    vi.spyOn(containerManager, "getContainer").mockReturnValue({
+      containerId: "cid-1",
+      name: "companion-s1",
+      image: "the-companion:latest",
+      portMappings: [{ containerPort: 6080, hostPort: 49200 }],
+      hostCwd: "/repo",
+      containerCwd: "/workspace",
+      state: "running",
+    });
+    vi.spyOn(containerManager, "hasBinaryInContainer").mockReturnValue(true);
+    vi.spyOn(containerManager, "isContainerAlive").mockReturnValue("running");
+    vi.spyOn(containerManager, "execInContainerAsync").mockResolvedValue({ exitCode: 0, output: "" });
+    // Simulate noVNC never becoming ready — all fetches throw
+    const fetchSpy = vi.spyOn(globalThis, "fetch").mockRejectedValue(new Error("connection refused"));
+
+    const res = await app.request("/api/sessions/s1/browser/start", { method: "POST" });
+
+    expect(res.status).toBe(200);
+    const json = await res.json();
+    expect(json).toMatchObject({
+      available: false,
+      mode: "container",
+    });
+    expect(json.message).toContain("timed out");
+    fetchSpy.mockRestore();
+  });
+
+  it("rejects file:// URL scheme in browser/start", async () => {
+    launcher.getSession.mockReturnValue({
+      sessionId: "s1",
+      state: "running",
+      cwd: "/repo",
+      containerId: "cid-1",
+    });
+    vi.spyOn(containerManager, "getContainer").mockReturnValue({
+      containerId: "cid-1",
+      name: "companion-s1",
+      image: "the-companion:latest",
+      portMappings: [{ containerPort: 6080, hostPort: 49200 }],
+      hostCwd: "/repo",
+      containerCwd: "/workspace",
+      state: "running",
+    });
+    vi.spyOn(containerManager, "hasBinaryInContainer").mockReturnValue(true);
+    vi.spyOn(containerManager, "isContainerAlive").mockReturnValue("running");
+    vi.spyOn(containerManager, "execInContainerAsync").mockResolvedValue({ exitCode: 0, output: "" });
+
+    const res = await app.request("/api/sessions/s1/browser/start", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ url: "file:///etc/passwd" }),
+    });
+
+    expect(res.status).toBe(200);
+    const json = await res.json();
+    expect(json).toMatchObject({ available: false });
+    expect(json.message).toContain("http://");
+  });
+});
+
+describe("POST /api/sessions/:id/browser/navigate", () => {
+  it("returns 404 when session not found", async () => {
+    launcher.getSession.mockReturnValue(undefined);
+
+    const res = await app.request("/api/sessions/s1/browser/navigate", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ url: "http://localhost:3000" }),
+    });
+
+    expect(res.status).toBe(404);
+  });
+
+  it("returns 400 for non-container session", async () => {
+    launcher.getSession.mockReturnValue({
+      sessionId: "s1",
+      state: "running",
+      cwd: "/repo",
+    });
+
+    const res = await app.request("/api/sessions/s1/browser/navigate", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ url: "http://localhost:3000" }),
+    });
+
+    expect(res.status).toBe(400);
+  });
+
+  it("rejects file:// URL scheme", async () => {
+    launcher.getSession.mockReturnValue({
+      sessionId: "s1",
+      state: "running",
+      cwd: "/repo",
+      containerId: "cid-1",
+    });
+
+    const res = await app.request("/api/sessions/s1/browser/navigate", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ url: "file:///etc/passwd" }),
+    });
+
+    expect(res.status).toBe(400);
+    const json = await res.json();
+    expect(json.error).toContain("http://");
+  });
+
+  it("navigates Chrome to the given URL", async () => {
+    launcher.getSession.mockReturnValue({
+      sessionId: "s1",
+      state: "running",
+      cwd: "/repo",
+      containerId: "cid-1",
+    });
+    vi.spyOn(containerManager, "getContainer").mockReturnValue({
+      containerId: "cid-1",
+      name: "companion-s1",
+      image: "the-companion:latest",
+      portMappings: [],
+      hostCwd: "/repo",
+      containerCwd: "/workspace",
+      state: "running",
+    });
+    const execSpy = vi.spyOn(containerManager, "execInContainerAsync").mockResolvedValue({ exitCode: 0, output: "" });
+
+    const res = await app.request("/api/sessions/s1/browser/navigate", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ url: "http://localhost:3000" }),
+    });
+
+    expect(res.status).toBe(200);
+    const json = await res.json();
+    expect(json).toMatchObject({ ok: true, url: "http://localhost:3000" });
+    expect(execSpy).toHaveBeenCalledWith(
+      "cid-1",
+      expect.arrayContaining(["sh", "-c"]),
+      { timeout: 10_000 },
+    );
+  });
+});
+
+describe("GET /api/sessions/:id/browser/proxy/*", () => {
+  it("returns 404 when session not found", async () => {
+    launcher.getSession.mockReturnValue(undefined);
+
+    const res = await app.request("/api/sessions/s1/browser/proxy/vnc.html");
+
+    expect(res.status).toBe(404);
+  });
+
+  it("returns 400 for non-container session", async () => {
+    launcher.getSession.mockReturnValue({
+      sessionId: "s1",
+      state: "running",
+      cwd: "/repo",
+    });
+
+    const res = await app.request("/api/sessions/s1/browser/proxy/vnc.html");
+
+    expect(res.status).toBe(400);
+  });
+
+  it("proxies request to container noVNC server", async () => {
+    launcher.getSession.mockReturnValue({
+      sessionId: "s1",
+      state: "running",
+      cwd: "/repo",
+      containerId: "cid-1",
+    });
+    vi.spyOn(containerManager, "getContainer").mockReturnValue({
+      containerId: "cid-1",
+      name: "companion-s1",
+      image: "the-companion:latest",
+      portMappings: [{ containerPort: 6080, hostPort: 49200 }],
+      hostCwd: "/repo",
+      containerCwd: "/workspace",
+      state: "running",
+    });
+    const fetchSpy = vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response("<html>noVNC</html>", {
+        status: 200,
+        headers: { "Content-Type": "text/html" },
+      }),
+    );
+
+    const res = await app.request("/api/sessions/s1/browser/proxy/vnc.html?autoconnect=true");
+
+    expect(res.status).toBe(200);
+    const body = await res.text();
+    expect(body).toBe("<html>noVNC</html>");
+    // fetch should have been called with the container's mapped port
+    expect(fetchSpy).toHaveBeenCalledWith(
+      expect.stringContaining("http://127.0.0.1:49200/vnc.html"),
+    );
+    fetchSpy.mockRestore();
+  });
+});
+
+describe("GET /api/sessions/:id/browser/host-proxy/:port/*", () => {
+  it("returns 404 when session not found", async () => {
+    launcher.getSession.mockReturnValue(undefined);
+
+    const res = await app.request("/api/sessions/s1/browser/host-proxy/3000/index.html");
+
+    expect(res.status).toBe(404);
+  });
+
+  it("returns 400 for invalid port", async () => {
+    launcher.getSession.mockReturnValue({
+      sessionId: "s1",
+      state: "running",
+      cwd: "/repo",
+    });
+
+    const res = await app.request("/api/sessions/s1/browser/host-proxy/99999/index.html");
+
+    expect(res.status).toBe(400);
+    const json = await res.json();
+    expect(json.error).toContain("Invalid port");
+  });
+
+  it("returns 400 for non-numeric port", async () => {
+    launcher.getSession.mockReturnValue({
+      sessionId: "s1",
+      state: "running",
+      cwd: "/repo",
+    });
+
+    const res = await app.request("/api/sessions/s1/browser/host-proxy/abc/index.html");
+
+    expect(res.status).toBe(400);
+    const json = await res.json();
+    expect(json.error).toContain("Invalid port");
+  });
+
+  // Security: Hono's router resolves literal ".." and "%2e%2e" before matching,
+  // returning 404 automatically. Our handler adds a defense-in-depth check for
+  // real HTTP servers where encoded traversal may bypass router normalization.
+  it("Hono blocks path traversal at router level (returns 404 not route match)", async () => {
+    launcher.getSession.mockReturnValue({
+      sessionId: "s1",
+      state: "running",
+      cwd: "/repo",
+    });
+
+    // Both literal and encoded ".." are resolved by Hono's router before matching
+    const res = await app.request("/api/sessions/s1/browser/host-proxy/3000/%2e%2e/%2e%2e/etc/passwd");
+    expect(res.status).toBe(404);
+  });
+
+  // Security: block proxying to the companion server itself (would bypass remote auth)
+  it("rejects proxying to the companion server port", async () => {
+    launcher.getSession.mockReturnValue({
+      sessionId: "s1",
+      state: "running",
+      cwd: "/repo",
+    });
+
+    // Default dev port is 3457
+    const res = await app.request("/api/sessions/s1/browser/host-proxy/3457/api/sessions");
+
+    expect(res.status).toBe(400);
+    const json = await res.json();
+    expect(json.error).toContain("Port not allowed");
+  });
+
+  it("blocks well-known sensitive service ports", async () => {
+    // Sensitive ports (databases, caches, mail) should be blocked to limit SSRF
+    launcher.getSession.mockReturnValue({
+      sessionId: "s1",
+      state: "running",
+      cwd: "/repo",
+    });
+
+    for (const blockedPort of [5432, 3306, 6379, 27017]) {
+      const res = await app.request(`/api/sessions/s1/browser/host-proxy/${blockedPort}/`);
+      expect(res.status).toBe(400);
+      const json = await res.json();
+      expect(json.error).toContain("Port not allowed");
+    }
+  });
+
+  it("proxies request to localhost on the given port", async () => {
+    launcher.getSession.mockReturnValue({
+      sessionId: "s1",
+      state: "running",
+      cwd: "/repo",
+    });
+    const fetchSpy = vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response("<html>App</html>", {
+        status: 200,
+        headers: { "Content-Type": "text/html" },
+      }),
+    );
+
+    const res = await app.request("/api/sessions/s1/browser/host-proxy/3000/index.html");
+
+    expect(res.status).toBe(200);
+    const body = await res.text();
+    expect(body).toBe("<html>App</html>");
+    // fetch should target 127.0.0.1 with the specified port and sub-path
+    expect(fetchSpy).toHaveBeenCalledWith(
+      "http://127.0.0.1:3000/index.html",
+      expect.objectContaining({ redirect: "follow" }),
+    );
+    fetchSpy.mockRestore();
+  });
+
+  it("forwards query string to upstream", async () => {
+    launcher.getSession.mockReturnValue({
+      sessionId: "s1",
+      state: "running",
+      cwd: "/repo",
+    });
+    const fetchSpy = vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response("ok", { status: 200 }),
+    );
+
+    const res = await app.request("/api/sessions/s1/browser/host-proxy/5173/assets/main.js?v=123");
+
+    expect(res.status).toBe(200);
+    expect(fetchSpy).toHaveBeenCalledWith(
+      "http://127.0.0.1:5173/assets/main.js?v=123",
+      expect.objectContaining({ redirect: "follow" }),
+    );
+    fetchSpy.mockRestore();
+  });
+
+  // Error message should be generic to avoid leaking internal network info
+  it("returns generic 502 when upstream is unreachable", async () => {
+    launcher.getSession.mockReturnValue({
+      sessionId: "s1",
+      state: "running",
+      cwd: "/repo",
+    });
+    const fetchSpy = vi.spyOn(globalThis, "fetch").mockRejectedValue(
+      new Error("Connection refused"),
+    );
+
+    const res = await app.request("/api/sessions/s1/browser/host-proxy/9999/");
+
+    expect(res.status).toBe(502);
+    const json = await res.json();
+    // Should NOT leak the raw error message (e.g. "Connection refused 127.0.0.1:9999")
+    expect(json.error).toBe("Proxy failed: upstream unreachable");
+    fetchSpy.mockRestore();
   });
 });

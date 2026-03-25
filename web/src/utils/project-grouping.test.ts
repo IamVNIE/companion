@@ -9,7 +9,7 @@ import {
 function makeItem(overrides: Partial<SessionItem> = {}): SessionItem {
   return {
     id: "s1",
-    model: "claude-sonnet-4-5-20250929",
+    model: "claude-sonnet-4-6",
     cwd: "/home/user/projects/myapp",
     gitBranch: "",
     isContainerized: false,
@@ -18,6 +18,7 @@ function makeItem(overrides: Partial<SessionItem> = {}): SessionItem {
     linesAdded: 0,
     linesRemoved: 0,
     isConnected: false,
+    isReconnecting: false,
     status: null,
     sdkState: null,
     createdAt: 1000,
@@ -54,6 +55,12 @@ describe("extractProjectKey", () => {
     expect(
       extractProjectKey("/home/user/myapp/web", "/home/user/myapp"),
     ).toBe("/home/user/myapp");
+  });
+
+  it("uses cwd when containerized repoRoot points to /workspace", () => {
+    expect(
+      extractProjectKey("/home/user/projects/companion", "/workspace", true),
+    ).toBe("/home/user/projects/companion");
   });
 });
 
@@ -251,5 +258,26 @@ describe("groupSessionsByProject", () => {
     const groups = groupSessionsByProject(sessions);
     expect(groups).toHaveLength(1);
     expect(groups[0].sessions.map((s) => s.id)).toEqual(["s1", "s2", "s3"]);
+  });
+
+  it("groups containerized sessions by host cwd when repoRoot is /workspace", () => {
+    const sessions = [
+      makeItem({
+        id: "s1",
+        cwd: "/home/user/companion",
+        repoRoot: "/workspace",
+        isContainerized: true,
+      }),
+      makeItem({
+        id: "s2",
+        cwd: "/home/user/companion",
+        repoRoot: "/workspace/packages/app",
+        isContainerized: true,
+      }),
+    ];
+    const groups = groupSessionsByProject(sessions);
+    expect(groups).toHaveLength(1);
+    expect(groups[0].key).toBe("/home/user/companion");
+    expect(groups[0].label).toBe("companion");
   });
 });

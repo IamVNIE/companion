@@ -1,29 +1,14 @@
 import { useState, useRef, useEffect, useCallback, useMemo } from "react";
 import { useStore } from "../store.js";
-import { sendToSession } from "../ws.js";
+import { createClientMessageId, sendToSession } from "../ws.js";
 import { CLAUDE_MODES, CODEX_MODES } from "../utils/backends.js";
+import { api, type SavedPrompt } from "../api.js";
 import type { ModeOption } from "../utils/backends.js";
+import { ModelSwitcher } from "./ModelSwitcher.js";
+import { MentionMenu } from "./MentionMenu.js";
+import { useMentionMenu } from "../utils/use-mention-menu.js";
 
-let idCounter = 0;
-
-interface ImageAttachment {
-  name: string;
-  base64: string;
-  mediaType: string;
-}
-
-function readFileAsBase64(file: File): Promise<{ base64: string; mediaType: string }> {
-  return new Promise((resolve, reject) => {
-    const reader = new FileReader();
-    reader.onload = () => {
-      const dataUrl = reader.result as string;
-      const base64 = dataUrl.split(",")[1];
-      resolve({ base64, mediaType: file.type });
-    };
-    reader.onerror = reject;
-    reader.readAsDataURL(file);
-  });
-}
+import { readFileAsBase64, type ImageAttachment } from "../utils/image.js";
 
 interface CommandItem {
   name: string;
@@ -35,9 +20,15 @@ export function Composer({ sessionId }: { sessionId: string }) {
   const [images, setImages] = useState<ImageAttachment[]>([]);
   const [slashMenuOpen, setSlashMenuOpen] = useState(false);
   const [slashMenuIndex, setSlashMenuIndex] = useState(0);
+  const [savePromptOpen, setSavePromptOpen] = useState(false);
+  const [savePromptName, setSavePromptName] = useState("");
+  const [savePromptScope, setSavePromptScope] = useState<"global" | "project">("global");
+  const [savePromptError, setSavePromptError] = useState<string | null>(null);
+  const [caretPos, setCaretPos] = useState(0);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const menuRef = useRef<HTMLDivElement>(null);
+  const pendingSelectionRef = useRef<number | null>(null);
   const cliConnected = useStore((s) => s.cliConnected);
   const sessionData = useStore((s) => s.sessions.get(sessionId));
   const previousMode = useStore((s) => s.previousPermissionMode.get(sessionId) || "acceptEdits");
@@ -48,6 +39,13 @@ export function Composer({ sessionId }: { sessionId: string }) {
   const isCodex = sessionData?.backend_type === "codex";
   const modes: ModeOption[] = isCodex ? CODEX_MODES : CLAUDE_MODES;
   const modeLabel = modes.find((m) => m.value === currentMode)?.label?.toLowerCase() || currentMode;
+
+  const mention = useMentionMenu({
+    text,
+    caretPos,
+    cwd: sessionData?.cwd,
+    enabled: !slashMenuOpen,
+  });
 
   // Build command list from session data
   const allCommands = useMemo<CommandItem[]>(() => {
@@ -76,7 +74,7 @@ export function Composer({ sessionId }: { sessionId: string }) {
     return allCommands.filter((cmd) => cmd.name.toLowerCase().includes(query));
   }, [text, slashMenuOpen, allCommands]);
 
-  // Open/close menu based on text
+  // Open/close slash menu based on text
   useEffect(() => {
     const shouldOpen = text.startsWith("/") && /^\/\S*$/.test(text) && allCommands.length > 0;
     if (shouldOpen && !slashMenuOpen) {
@@ -87,14 +85,14 @@ export function Composer({ sessionId }: { sessionId: string }) {
     }
   }, [text, allCommands.length, slashMenuOpen]);
 
-  // Keep selected index in bounds
+  // Keep slash menu selected index in bounds
   useEffect(() => {
     if (slashMenuIndex >= filteredCommands.length) {
       setSlashMenuIndex(Math.max(0, filteredCommands.length - 1));
     }
   }, [filteredCommands.length, slashMenuIndex]);
 
-  // Scroll selected item into view
+  // Scroll slash menu selected item into view
   useEffect(() => {
     if (!menuRef.current || !slashMenuOpen) return;
     const items = menuRef.current.querySelectorAll("[data-cmd-index]");
@@ -104,25 +102,48 @@ export function Composer({ sessionId }: { sessionId: string }) {
     }
   }, [slashMenuIndex, slashMenuOpen]);
 
+  useEffect(() => {
+    if (pendingSelectionRef.current === null || !textareaRef.current) return;
+    const next = pendingSelectionRef.current;
+    textareaRef.current.setSelectionRange(next, next);
+    pendingSelectionRef.current = null;
+  }, [text]);
+
   const selectCommand = useCallback((cmd: CommandItem) => {
     setText(`/${cmd.name} `);
     setSlashMenuOpen(false);
     textareaRef.current?.focus();
   }, []);
 
+  const selectPrompt = useCallback((prompt: SavedPrompt) => {
+    const result = mention.selectPrompt(prompt);
+    pendingSelectionRef.current = result.nextCursor;
+    setText(result.nextText);
+    mention.setMentionMenuOpen(false);
+    setCaretPos(result.nextCursor);
+    textareaRef.current?.focus();
+    // Auto-resize textarea after prompt insertion
+    if (textareaRef.current) {
+      textareaRef.current.style.height = "auto";
+      textareaRef.current.style.height = Math.min(textareaRef.current.scrollHeight, 200) + "px";
+    }
+  }, [mention]);
+
   function handleSend() {
     const msg = text.trim();
     if (!msg || !isConnected) return;
+    const clientMsgId = createClientMessageId();
 
     sendToSession(sessionId, {
       type: "user_message",
       content: msg,
       session_id: sessionId,
       images: images.length > 0 ? images.map((img) => ({ media_type: img.mediaType, data: img.base64 })) : undefined,
+      client_msg_id: clientMsgId,
     });
 
     useStore.getState().appendMessage(sessionId, {
-      id: `user-${Date.now()}-${++idCounter}`,
+      id: clientMsgId,
       role: "user",
       content: msg,
       images: images.length > 0 ? images.map((img) => ({ media_type: img.mediaType, data: img.base64 })) : undefined,
@@ -132,6 +153,7 @@ export function Composer({ sessionId }: { sessionId: string }) {
     setText("");
     setImages([]);
     setSlashMenuOpen(false);
+    mention.setMentionMenuOpen(false);
 
     if (textareaRef.current) {
       textareaRef.current.style.height = "auto";
@@ -169,6 +191,41 @@ export function Composer({ sessionId }: { sessionId: string }) {
       }
     }
 
+    if (mention.mentionMenuOpen) {
+      if (e.key === "Escape") {
+        e.preventDefault();
+        mention.setMentionMenuOpen(false);
+        return;
+      }
+    }
+
+    if (mention.mentionMenuOpen && mention.filteredPrompts.length > 0) {
+      if (e.key === "ArrowDown") {
+        e.preventDefault();
+        mention.setMentionMenuIndex((i) => (i + 1) % mention.filteredPrompts.length);
+        return;
+      }
+      if (e.key === "ArrowUp") {
+        e.preventDefault();
+        mention.setMentionMenuIndex((i) => (i - 1 + mention.filteredPrompts.length) % mention.filteredPrompts.length);
+        return;
+      }
+      if ((e.key === "Tab" && !e.shiftKey) || (e.key === "Enter" && !e.shiftKey)) {
+        e.preventDefault();
+        selectPrompt(mention.filteredPrompts[mention.mentionMenuIndex]);
+        return;
+      }
+    }
+
+    if (
+      mention.mentionMenuOpen
+      && mention.filteredPrompts.length === 0
+      && ((e.key === "Enter" && !e.shiftKey) || (e.key === "Tab" && !e.shiftKey))
+    ) {
+      e.preventDefault();
+      return;
+    }
+
     if (e.key === "Tab" && e.shiftKey) {
       e.preventDefault();
       toggleMode();
@@ -182,9 +239,15 @@ export function Composer({ sessionId }: { sessionId: string }) {
 
   function handleInput(e: React.ChangeEvent<HTMLTextAreaElement>) {
     setText(e.target.value);
+    setCaretPos(e.target.selectionStart ?? e.target.value.length);
     const ta = e.target;
     ta.style.height = "auto";
     ta.style.height = Math.min(ta.scrollHeight, 200) + "px";
+  }
+
+  function syncCaret() {
+    if (!textareaRef.current) return;
+    setCaretPos(textareaRef.current.selectionStart ?? 0);
   }
 
   function handleInterrupt() {
@@ -226,16 +289,45 @@ export function Composer({ sessionId }: { sessionId: string }) {
   }
 
   function toggleMode() {
-    if (!isConnected || isCodex) return;
+    if (!isConnected) return;
     const store = useStore.getState();
     if (!isPlan) {
       store.setPreviousPermissionMode(sessionId, currentMode);
       sendToSession(sessionId, { type: "set_permission_mode", mode: "plan" });
       store.updateSession(sessionId, { permissionMode: "plan" });
     } else {
-      const restoreMode = previousMode || "acceptEdits";
+      const restoreMode = previousMode || (isCodex ? "bypassPermissions" : "acceptEdits");
       sendToSession(sessionId, { type: "set_permission_mode", mode: restoreMode });
       store.updateSession(sessionId, { permissionMode: restoreMode });
+    }
+  }
+
+  async function handleCreatePrompt() {
+    const content = text.trim();
+    const name = savePromptName.trim();
+    if (!content || !name) return;
+    if (savePromptScope === "project" && !sessionData?.cwd) {
+      setSavePromptError("No project folder available for this session");
+      return;
+    }
+    const payload: { name: string; content: string; scope: "global" | "project"; projectPaths?: string[] } = {
+      name,
+      content,
+      scope: savePromptScope,
+    };
+    if (savePromptScope === "project") {
+      payload.projectPaths = [sessionData!.cwd!];
+    }
+    try {
+      await api.createPrompt(payload);
+      await mention.refreshPrompts();
+      setSavePromptOpen(false);
+      setSavePromptName("");
+      setSavePromptScope("global");
+      setSavePromptError(null);
+    } catch (error) {
+      const message = error instanceof Error && error.message ? error.message : "Could not save prompt.";
+      setSavePromptError(message);
     }
   }
 
@@ -244,11 +336,11 @@ export function Composer({ sessionId }: { sessionId: string }) {
   const canSend = text.trim().length > 0 && isConnected;
 
   return (
-    <div className="shrink-0 px-2 sm:px-4 pt-2.5 sm:pt-3 pb-3 sm:pb-4 bg-transparent">
-      <div className="max-w-4xl mx-auto">
+    <div className="shrink-0 px-0 sm:px-6 pt-0 sm:pt-3 pb-5 sm:pb-4 bg-cc-input-bg sm:bg-transparent">
+      <div className="max-w-3xl mx-auto">
         {/* Image thumbnails */}
         {images.length > 0 && (
-          <div className="flex items-center gap-2 mb-2 flex-wrap">
+          <div className="flex items-center gap-2 mb-2 px-3 sm:px-0 flex-wrap">
             {images.map((img, i) => (
               <div key={i} className="relative group">
                 <img
@@ -258,7 +350,8 @@ export function Composer({ sessionId }: { sessionId: string }) {
                 />
                 <button
                   onClick={() => removeImage(i)}
-                  className="absolute -top-1.5 -right-1.5 w-4 h-4 rounded-full bg-cc-error text-white flex items-center justify-center text-[10px] opacity-0 group-hover:opacity-100 transition-opacity cursor-pointer"
+                  aria-label="Remove image"
+                  className="absolute -top-1.5 -right-1.5 w-6 h-6 rounded-full bg-cc-error text-white flex items-center justify-center text-[10px] opacity-100 sm:opacity-0 sm:group-hover:opacity-100 transition-opacity cursor-pointer"
                 >
                   <svg viewBox="0 0 16 16" fill="currentColor" className="w-2.5 h-2.5">
                     <path d="M4 4l8 8M12 4l-8 8" stroke="currentColor" strokeWidth="2" strokeLinecap="round" fill="none" />
@@ -277,13 +370,14 @@ export function Composer({ sessionId }: { sessionId: string }) {
           multiple
           onChange={handleFileSelect}
           className="hidden"
+          aria-label="Attach images"
         />
 
-        {/* Unified input card */}
-        <div className={`relative bg-cc-input-bg/95 border rounded-[14px] shadow-[0_10px_30px_rgba(0,0,0,0.10)] overflow-visible transition-colors backdrop-blur-sm ${
+        {/* Input container: flat separator on mobile, card on desktop */}
+        <div className={`relative overflow-visible transition-all duration-200 border-t border-cc-separator sm:border sm:border-cc-border sm:bg-cc-input-bg/95 sm:rounded-[16px] sm:backdrop-blur-sm composer-card ${
           isPlan
-            ? "border-cc-primary/40"
-            : "border-cc-border focus-within:border-cc-primary/30"
+            ? "sm:border-cc-primary/40 sm:shadow-[0_10px_30px_rgba(217,119,87,0.08)]"
+            : "sm:focus-within:border-cc-primary/25"
         }`}>
           {/* Slash command menu */}
           {slashMenuOpen && filteredCommands.length > 0 && (
@@ -322,18 +416,103 @@ export function Composer({ sessionId }: { sessionId: string }) {
             </div>
           )}
 
-          <div className="flex items-end gap-2 px-2.5 py-2">
+          {/* @ prompt menu */}
+          <MentionMenu
+            open={mention.mentionMenuOpen}
+            loading={mention.promptsLoading}
+            prompts={mention.filteredPrompts}
+            selectedIndex={mention.mentionMenuIndex}
+            onSelect={selectPrompt}
+            menuRef={mention.mentionMenuRef}
+            className="absolute left-2 right-2 bottom-full mb-1"
+          />
+
+          {savePromptOpen && (
+            <div className="absolute left-2 right-2 bottom-full mb-1 bg-cc-card border border-cc-border rounded-[10px] shadow-lg z-20 p-3 space-y-2">
+              <div className="text-xs font-semibold text-cc-fg">Save prompt</div>
+              <input
+                value={savePromptName}
+                onChange={(e) => {
+                  setSavePromptName(e.target.value);
+                  if (savePromptError) setSavePromptError(null);
+                }}
+                placeholder="Prompt title"
+                aria-label="Prompt title"
+                className="w-full px-2 py-1.5 text-sm bg-cc-input-bg border border-cc-border rounded-md text-cc-fg focus:outline-none focus:border-cc-primary/40"
+              />
+              <div className="flex items-center gap-1.5">
+                <button
+                  type="button"
+                  aria-pressed={savePromptScope === "global"}
+                  onClick={() => setSavePromptScope("global")}
+                  className={`px-2 py-0.5 text-[11px] rounded border transition-colors cursor-pointer ${
+                    savePromptScope === "global"
+                      ? "border-cc-primary/40 text-cc-primary bg-cc-primary/8"
+                      : "border-cc-border text-cc-muted hover:text-cc-fg"
+                  }`}
+                >
+                  Global
+                </button>
+                <button
+                  type="button"
+                  aria-pressed={savePromptScope === "project"}
+                  onClick={() => setSavePromptScope("project")}
+                  className={`px-2 py-0.5 text-[11px] rounded border transition-colors cursor-pointer ${
+                    savePromptScope === "project"
+                      ? "border-cc-primary/40 text-cc-primary bg-cc-primary/8"
+                      : "border-cc-border text-cc-muted hover:text-cc-fg"
+                  }`}
+                >
+                  This project
+                </button>
+              </div>
+              {savePromptScope === "project" && sessionData?.cwd && (
+                <div className="text-[10px] text-cc-muted font-mono-code truncate" title={sessionData.cwd}>
+                  {sessionData.cwd}
+                </div>
+              )}
+              {savePromptError ? (
+                <div className="text-[11px] text-cc-error">{savePromptError}</div>
+              ) : null}
+              <div className="flex items-center gap-1.5 justify-end">
+                <button
+                  onClick={() => {
+                    setSavePromptOpen(false);
+                    setSavePromptScope("global");
+                    setSavePromptError(null);
+                  }}
+                  className="px-2 py-1 text-[11px] rounded-md border border-cc-border text-cc-muted hover:text-cc-fg cursor-pointer"
+                >
+                  Cancel
+                </button>
+                <button
+                  onClick={handleCreatePrompt}
+                  disabled={!savePromptName.trim() || !text.trim()}
+                  className={`px-2 py-1 text-[11px] rounded-md border ${
+                    savePromptName.trim() && text.trim()
+                      ? "border-cc-primary/40 text-cc-primary bg-cc-primary/8 cursor-pointer"
+                      : "border-cc-border text-cc-muted cursor-not-allowed"
+                  }`}
+                >
+                  Save
+                </button>
+              </div>
+            </div>
+          )}
+
+          {/* Mobile toolbar: mode toggle + model switcher + secondary actions (hidden on sm+) */}
+          <div className="flex items-center gap-1.5 px-3 pt-1.5 pb-0.5 sm:hidden">
             <button
               onClick={toggleMode}
-              disabled={!isConnected || isCodex}
-              className={`mb-0.5 flex items-center gap-1.5 px-2.5 py-1.5 rounded-md text-[12px] font-semibold transition-all border select-none shrink-0 ${
-                !isConnected || isCodex
+              disabled={!isConnected}
+              className={`flex items-center gap-1.5 px-2 py-1 rounded-md text-[12px] font-semibold transition-all border select-none shrink-0 ${
+                !isConnected
                   ? "opacity-30 cursor-not-allowed text-cc-muted border-transparent"
                   : isPlan
-                    ? "text-cc-primary border-cc-primary/30 bg-cc-primary/8 hover:bg-cc-primary/12 cursor-pointer"
-                    : "text-cc-muted border-cc-border hover:text-cc-fg hover:bg-cc-hover cursor-pointer"
+                    ? "text-cc-primary border-cc-primary/30 bg-cc-primary/8"
+                    : "text-cc-muted border-cc-border"
               }`}
-              title={isCodex ? "Mode is fixed for Codex sessions" : "Toggle mode (Shift+Tab)"}
+              title="Toggle mode (Shift+Tab)"
             >
               {isPlan ? (
                 <svg viewBox="0 0 16 16" fill="currentColor" className="w-3.5 h-3.5">
@@ -349,67 +528,199 @@ export function Composer({ sessionId }: { sessionId: string }) {
               <span>{modeLabel}</span>
             </button>
 
+            <ModelSwitcher sessionId={sessionId} />
+
+            <div className="flex-1" />
+
+            <button
+              onClick={() => {
+                const defaultName = text.trim().slice(0, 32);
+                setSavePromptName(defaultName || "");
+                setSavePromptError(null);
+                setSavePromptOpen((v) => !v);
+              }}
+              disabled={!isConnected || !text.trim()}
+              className={`flex items-center justify-center w-8 h-8 rounded-md transition-colors ${
+                isConnected && text.trim()
+                  ? "text-cc-muted hover:text-cc-fg hover:bg-cc-hover cursor-pointer"
+                  : "text-cc-muted opacity-30 cursor-not-allowed"
+              }`}
+              title="Save as prompt"
+            >
+              <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" className="w-4 h-4">
+                <path d="M4 2.75h8A1.25 1.25 0 0113.25 4v9.25L8 10.5l-5.25 2.75V4A1.25 1.25 0 014 2.75z" />
+              </svg>
+            </button>
+
+            <button
+              onClick={() => fileInputRef.current?.click()}
+              disabled={!isConnected}
+              className={`flex items-center justify-center w-8 h-8 rounded-md transition-colors ${
+                isConnected
+                  ? "text-cc-muted hover:text-cc-fg hover:bg-cc-hover cursor-pointer"
+                  : "text-cc-muted opacity-30 cursor-not-allowed"
+              }`}
+              title="Upload image"
+            >
+              <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" className="w-4 h-4">
+                <rect x="2" y="2" width="12" height="12" rx="2" />
+                <circle cx="5.5" cy="5.5" r="1" fill="currentColor" stroke="none" />
+                <path d="M2 11l3-3 2 2 3-4 4 5" strokeLinecap="round" strokeLinejoin="round" />
+              </svg>
+            </button>
+          </div>
+
+          {/* Textarea row */}
+          <div className="px-3 sm:px-3 pt-1 sm:pt-2.5">
             <textarea
               ref={textareaRef}
               value={text}
               onChange={handleInput}
               onKeyDown={handleKeyDown}
+              onClick={syncCaret}
+              onKeyUp={syncCaret}
               onPaste={handlePaste}
+              aria-label="Message input"
               placeholder={isConnected
-                ? "Type a message... (/ for commands)"
+                ? "Type a message... (/ + @)"
                 : "Waiting for CLI connection..."}
               disabled={!isConnected}
               rows={1}
-              className="flex-1 min-w-0 px-2 py-1.5 text-base sm:text-sm bg-transparent resize-none focus:outline-none text-cc-fg font-sans-ui placeholder:text-cc-muted disabled:opacity-50 overflow-y-auto"
+              className="w-full px-1 py-1.5 text-base sm:text-sm bg-transparent resize-none outline-none text-cc-fg font-sans-ui placeholder:text-cc-muted disabled:opacity-50 overflow-y-auto"
               style={{ minHeight: "36px", maxHeight: "200px" }}
             />
+          </div>
 
-            {/* Right: image + send/stop */}
-            <div className="mb-0.5 flex items-center gap-1.5 shrink-0">
+          {/* Mobile action row (hidden on sm+) */}
+          <div className="flex items-center justify-end gap-1 px-3 pb-1 sm:hidden">
+            {/* Send/stop */}
+            {isRunning ? (
               <button
-                onClick={() => fileInputRef.current?.click()}
-                disabled={!isConnected}
-                className={`flex items-center justify-center w-9 h-9 rounded-lg border transition-colors ${
-                  isConnected
-                    ? "text-cc-muted border-cc-border hover:text-cc-fg hover:bg-cc-hover cursor-pointer"
-                    : "text-cc-muted opacity-30 border-cc-border/60 cursor-not-allowed"
-                }`}
-                title="Upload image"
+                onClick={handleInterrupt}
+                className="flex items-center justify-center w-10 h-10 rounded-lg bg-cc-error/10 hover:bg-cc-error/20 text-cc-error transition-colors cursor-pointer"
+                title="Stop generation"
               >
-                <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" className="w-4 h-4">
-                  <rect x="2" y="2" width="12" height="12" rx="2" />
-                  <circle cx="5.5" cy="5.5" r="1" fill="currentColor" stroke="none" />
-                  <path d="M2 11l3-3 2 2 3-4 4 5" strokeLinecap="round" strokeLinejoin="round" />
+                <svg viewBox="0 0 16 16" fill="currentColor" className="w-3.5 h-3.5">
+                  <rect x="3" y="3" width="10" height="10" rx="1" />
                 </svg>
               </button>
+            ) : (
+              <button
+                onClick={handleSend}
+                disabled={!canSend}
+                className={`flex items-center justify-center w-10 h-10 rounded-full transition-all duration-200 ${
+                  canSend
+                    ? "bg-cc-primary hover:bg-cc-primary-hover active:scale-95 text-white cursor-pointer shadow-[0_4px_16px_rgba(217,119,87,0.25)]"
+                    : "bg-cc-hover text-cc-muted cursor-not-allowed"
+                }`}
+                title="Send message"
+              >
+                <svg viewBox="0 0 16 16" fill="currentColor" className="w-3.5 h-3.5">
+                  <path d="M3 2l11 6-11 6V9.5l7-1.5-7-1.5V2z" />
+                </svg>
+              </button>
+            )}
+          </div>
 
-              {isRunning ? (
-                <button
-                  onClick={handleInterrupt}
-                  className="flex items-center justify-center w-9 h-9 rounded-lg bg-cc-error/10 hover:bg-cc-error/20 text-cc-error transition-colors cursor-pointer"
-                  title="Stop generation"
-                >
-                  <svg viewBox="0 0 16 16" fill="currentColor" className="w-3.5 h-3.5">
-                    <rect x="3" y="3" width="10" height="10" rx="1" />
-                  </svg>
-                </button>
+          {/* Desktop action bar: + bookmark mode spacer model send (hidden on mobile) */}
+          <div className="hidden sm:flex items-center gap-1.5 px-2.5 pb-2">
+            {/* + button (image upload) */}
+            <button
+              onClick={() => fileInputRef.current?.click()}
+              disabled={!isConnected}
+              className={`flex items-center justify-center w-8 h-8 rounded-md transition-colors ${
+                isConnected
+                  ? "text-cc-muted hover:text-cc-fg hover:bg-cc-hover cursor-pointer"
+                  : "text-cc-muted opacity-30 cursor-not-allowed"
+              }`}
+              title="Attach image"
+            >
+              <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" className="w-4 h-4">
+                <path d="M8 3v10M3 8h10" strokeLinecap="round" />
+              </svg>
+            </button>
+
+            {/* Save prompt (bookmark) */}
+            <button
+              onClick={() => {
+                const defaultName = text.trim().slice(0, 32);
+                setSavePromptName(defaultName || "");
+                setSavePromptError(null);
+                setSavePromptOpen((v) => !v);
+              }}
+              disabled={!isConnected || !text.trim()}
+              className={`flex items-center justify-center w-8 h-8 rounded-md transition-colors ${
+                isConnected && text.trim()
+                  ? "text-cc-muted hover:text-cc-fg hover:bg-cc-hover cursor-pointer"
+                  : "text-cc-muted opacity-30 cursor-not-allowed"
+              }`}
+              title="Save as prompt"
+            >
+              <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" className="w-4 h-4">
+                <path d="M4 2.75h8A1.25 1.25 0 0113.25 4v9.25L8 10.5l-5.25 2.75V4A1.25 1.25 0 014 2.75z" />
+              </svg>
+            </button>
+
+            {/* Mode toggle */}
+            <button
+              onClick={toggleMode}
+              disabled={!isConnected}
+              className={`flex items-center gap-1.5 px-2.5 py-1.5 rounded-md text-[12px] font-semibold transition-all border select-none shrink-0 ${
+                !isConnected
+                  ? "opacity-30 cursor-not-allowed text-cc-muted border-transparent"
+                  : isPlan
+                    ? "text-cc-primary border-cc-primary/30 bg-cc-primary/8 hover:bg-cc-primary/12 cursor-pointer"
+                    : "text-cc-muted border-cc-border hover:text-cc-fg hover:bg-cc-hover cursor-pointer"
+              }`}
+              title="Toggle mode (Shift+Tab)"
+            >
+              {isPlan ? (
+                <svg viewBox="0 0 16 16" fill="currentColor" className="w-3.5 h-3.5">
+                  <rect x="3" y="3" width="3.5" height="10" rx="0.75" />
+                  <rect x="9.5" y="3" width="3.5" height="10" rx="0.75" />
+                </svg>
               ) : (
-                <button
-                  onClick={handleSend}
-                  disabled={!canSend}
-                  className={`flex items-center justify-center w-9 h-9 rounded-full transition-colors ${
-                    canSend
-                      ? "bg-cc-primary hover:bg-cc-primary-hover text-white cursor-pointer shadow-[0_6px_20px_rgba(0,0,0,0.18)]"
-                      : "bg-cc-hover text-cc-muted cursor-not-allowed"
-                  }`}
-                  title="Send message"
-                >
-                  <svg viewBox="0 0 16 16" fill="currentColor" className="w-3.5 h-3.5">
-                    <path d="M3 2l11 6-11 6V9.5l7-1.5-7-1.5V2z" />
-                  </svg>
-                </button>
+                <svg viewBox="0 0 16 16" fill="currentColor" className="w-3.5 h-3.5">
+                  <path d="M2.5 4l4 4-4 4" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" fill="none" />
+                  <path d="M8.5 4l4 4-4 4" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" fill="none" />
+                </svg>
               )}
-            </div>
+              <span>{modeLabel}</span>
+            </button>
+
+            {/* Spacer */}
+            <div className="flex-1" />
+
+            {/* Model switcher */}
+            <ModelSwitcher sessionId={sessionId} />
+
+            {/* Send/stop */}
+            {isRunning ? (
+              <button
+                onClick={handleInterrupt}
+                className="flex items-center justify-center w-9 h-9 rounded-lg bg-cc-error/10 hover:bg-cc-error/20 text-cc-error transition-colors cursor-pointer"
+                title="Stop generation"
+              >
+                <svg viewBox="0 0 16 16" fill="currentColor" className="w-3.5 h-3.5">
+                  <rect x="3" y="3" width="10" height="10" rx="1" />
+                </svg>
+              </button>
+            ) : (
+              <button
+                onClick={handleSend}
+                disabled={!canSend}
+                className={`flex items-center justify-center w-9 h-9 rounded-full transition-all duration-200 ${
+                  canSend
+                    ? "bg-cc-primary hover:bg-cc-primary-hover hover:scale-105 text-white cursor-pointer shadow-[0_4px_16px_rgba(217,119,87,0.25)]"
+                    : "bg-cc-hover text-cc-muted cursor-not-allowed"
+                }`}
+                title="Send message"
+              >
+                <svg viewBox="0 0 16 16" fill="currentColor" className="w-3.5 h-3.5">
+                  <path d="M3 2l11 6-11 6V9.5l7-1.5-7-1.5V2z" />
+                </svg>
+              </button>
+            )}
           </div>
 
         </div>

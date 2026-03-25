@@ -29,9 +29,13 @@ describe("Playground", () => {
     // Dynamic tool permission should be visible inside the integrated ChatView.
     expect(within(realChat).getByText("dynamic:code_interpreter")).toBeTruthy();
 
-    // Streaming text from MessageFeed mock state should also be rendered.
-    expect(
-      within(realChat).getByText("I'm updating tests and then I'll run the full suite."),
-    ).toBeTruthy();
+    // Subagent playground demo should show Codex-specific metadata presentation.
+    expect(screen.getByText("sender: thr_main")).toBeTruthy();
+    expect(screen.getByText("thr_sub_1")).toBeTruthy();
+
+    // Interesting event states should be represented in the playground.
+    expect(screen.getByText("Interesting Events")).toBeTruthy();
+    expect(screen.getByText("Context compacted (auto, pre-tokens: 182344).")).toBeTruthy();
+    expect(screen.getByText("Hook success: lint (post_tool_use) (exit 0).")).toBeTruthy();
   });
 });
